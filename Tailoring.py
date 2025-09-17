@@ -14,9 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import Delaunay
 from scipy import interpolate
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import triang
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from Archive_Code import lattice
+
 import Utils
 from Fairing import FairingData
 
@@ -1162,22 +1163,211 @@ class Mesh:
             "missing_beam_edges_in_triangles": np.asarray(missing_beam_edges, dtype=int)
         }
 
-    def plot_groups_2D(self, filename: str, group_keys: list[str] = [], label: bool = False):
+    def plot_2D(self, keys: dict = {}, label: bool = False, save_path=None, show=False):
         """
-        Plots groups of lines from mesh.groups. Each group contains lines as arrays of node indices.
-        Optionally, only specified group_keys are plotted. Plots on two subplots (top/bottom surface).
+        Plots the 2D mesh with options to plot groups, nodes, beams and triangles.
+        """
+        def groups(group_sets):
+            """
+            Plots 2D groups.    
+            """
+            # Determine which groups to plot
+            keys = group_sets if len(group_sets) > 0 else list(self.groups.keys())
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
 
-        Parameters:
-            filename (str): Output filename (without extension).
-            group_keys (list[str], optional): List of group keys to plot. If None, plot all groups.
-            label (bool): Whether to label the lines with their index.
-        """
+            labelled_node = []
+            for i, ax in enumerate(axes):
+                for row, group_key in enumerate(keys):
+                    group_lines = self.groups[group_key]
+                    for idx, line_indices in enumerate(group_lines):
+                        if line_indices.shape[0] > 0:
+                            line_indices = np.array(line_indices, dtype=int)
+                            line_coords = self.nodes[line_indices]
+                            ax.plot(line_coords[:, 0], line_coords[:, 1], color=colours[row], marker='.', markersize=0.15,
+                                    linestyle='-', linewidth=0.5, label=group_key if idx == 0 else None)
+                            if label:
+                                # LINE LABEL
+                                # Find the node inside the boundary and closest to the middle
+                                boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
+                                boundary_y_min, boundary_y_max = y_lim
+                                # Mask for nodes inside the boundary
+                                inside_mask = (
+                                    (line_coords[:, 0] >= boundary_x_min) & (line_coords[:, 0] <= boundary_x_max) &
+                                    (line_coords[:, 1] >= boundary_y_min) & (line_coords[:, 1] <= boundary_y_max)
+                                )
+                                if np.any(inside_mask):
+                                    # Find the node closest to the mean of the inside nodes
+                                    inside_coords = line_coords[inside_mask]
+                                    center = np.mean(inside_coords, axis=0)
+                                    squared_dists = np.sum((inside_coords - center)**2, axis=1)
+                                    closest_idx = np.argmin(squared_dists)
+                                    label_x, label_y = inside_coords[closest_idx]
+                                    ax.text(label_x, label_y, f"l:{idx}", color=colours[row],
+                                            ha='center', va='top', fontsize=3)
+                                # NODE LABEL
+                                # Label each node in the line with its index in the line, but only once per node
+                                for node_idx, (x, y) in enumerate(line_coords[inside_mask]):
+                                    global_node_idx = line_indices[inside_mask][node_idx]
+                                    if global_node_idx not in labelled_node:
+                                        labelled_node.append(global_node_idx)
+                                        ax.text(x, y, f"{global_node_idx}", color='black', ha='center', va='bottom', fontsize=2)
+
+        def nodes(node_sets):
+            """
+            2D scatter plot of nodes.
+            """
+            # Determine which nodes to plot
+            if node_sets and all(k in self.nsets for k in node_sets):
+                keys = node_sets
+                nodes_by_key = {k: self.nodes[self.nsets[k]] for k in keys}
+            else:
+                keys = ["Nodes"]
+                nodes_by_key = {"Nodes": self.nodes}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
+
+            for i, ax in enumerate(axes):
+                for row, key in enumerate(keys):
+                    nodes = nodes_by_key[key]
+                    ax.scatter(
+                        nodes[:, 0], nodes[:, 1],
+                        color=colours[row], s=20, marker='.',
+                        label=key, alpha=0.6
+                    )
+                    if label:
+                        # LABEL NODES (inside boundary)
+                        boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
+                        boundary_y_min, boundary_y_max = y_lim
+                        inside_mask = (
+                            (nodes[:, 0] >= boundary_x_min) & (nodes[:, 0] <= boundary_x_max) &
+                            (nodes[:, 1] >= boundary_y_min) & (nodes[:, 1] <= boundary_y_max)
+                        )
+                        inside_nodes = nodes[inside_mask]
+                        for idx, (x, y) in enumerate(inside_nodes):
+                            ax.text(x, y, f"n:{idx}", color=colours[row],
+                                    ha='center', va='bottom', fontsize=2)
+
+        def beams(beam_sets):
+            """
+            2D line plot of beams.
+            """
+
+            # Determine which beams to plot
+            if beam_sets and all(k in self.beam_sets for k in beam_sets):
+                keys = beam_sets
+                beams_by_key = {k: self.beams[self.beam_sets[k]] for k in keys}
+            else:
+                keys = ["Beams"]
+                beams_by_key = {"Beams": self.beams}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
+
+            for i, ax in enumerate(axes):
+                for row, key in enumerate(keys):
+                    beams = beams_by_key[key]
+                    for idx, beam in enumerate(beams):
+                        beam = np.array(beam, dtype=int)
+                        beam_coords = self.nodes[beam]
+                        ax.plot(
+                            beam_coords[:, 0], beam_coords[:, 1],
+                            color=colours[row], marker='.', markersize=0.5,
+                            linestyle='-', linewidth=0.5, label=key if idx == 0 else None
+                        )
+                        if label:
+                            # LABEL BEAM (at midpoint inside boundary)
+                            boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
+                            boundary_y_min, boundary_y_max = y_lim
+                            inside_mask = (
+                                (beam_coords[:, 0] >= boundary_x_min) & (beam_coords[:, 0] <= boundary_x_max) &
+                                (beam_coords[:, 1] >= boundary_y_min) & (beam_coords[:, 1] <= boundary_y_max)
+                            )
+                            if np.any(inside_mask):
+                                inside_coords = beam_coords[inside_mask]
+                                center = np.mean(inside_coords, axis=0)
+                                label_x, label_y = center
+                                ax.text(label_x, label_y, f"b:{idx}", color=colours[row],
+                                        ha='center', va='top', fontsize=2)
+
+        def triangles(triangle_sets):
+            """
+            2D patch plot of triangles.
+            """
+            # Determine which triangles to plot
+            if triangle_sets and all(k in self.triangle_sets for k in triangle_sets):
+                keys = triangle_sets
+                triangles_by_key = {k: self.triangles[self.triangle_sets[k]] for k in keys}
+            else:
+                keys = ["Triangles"]
+                triangles_by_key = {"Triangles": self.triangles}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
+
+            for i, ax in enumerate(axes):
+                for row, key in enumerate(keys):
+                    triangles = triangles_by_key[key]
+                    for idx, triangle in enumerate(triangles):
+                        pts = self.nodes[triangle][:, :2]
+                        polygon = patches.Polygon(
+                            pts,
+                            closed=True,
+                            facecolor=colours[row],
+                            alpha=0.2,
+                            edgecolor='k',
+                            linewidth=0.5,
+                            label=key if idx == 0 else None
+                        )
+                        ax.add_patch(polygon)
+                        if label:
+                            # LABEL TRIANGLE (at centroid if inside boundary)
+                            boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
+                            boundary_y_min, boundary_y_max = y_lim
+                            centroid = np.mean(pts, axis=0)
+                            if (
+                                (centroid[0] >= boundary_x_min) and (centroid[0] <= boundary_x_max) and
+                                (centroid[1] >= boundary_y_min) and (centroid[1] <= boundary_y_max)
+                            ):
+                                ax.text(centroid[0], centroid[1], f"t:{idx}", color=colours[row],
+                                        ha='center', va='center', fontsize=2)
+
         fig, axes = plt.subplots(2)
-        keys = group_keys if len(group_keys) > 0 else list(self.groups.keys())
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
 
+        try:
+            group_sets = keys["group_sets"]
+            groups(group_sets)
+        except KeyError:
+            pass
+
+        try:
+            node_sets = keys["node_sets"]
+            nodes(node_sets)
+        except KeyError:
+            pass
+
+        try:
+            beam_sets = keys["beam_sets"]
+            beams(beam_sets)
+        except KeyError:
+            pass
+
+        try:
+            triangle_sets = keys["triangle_sets"]
+            triangles(triangle_sets)
+        except KeyError:
+            pass
+
+        for i, ax in enumerate(axes):
+            ax.set_xlabel('$\\eta$-Axis', fontsize=9)
+            ax.set_ylabel('$\\zeta$-Axis', fontsize=9)
+            ax.tick_params(axis='x', labelsize=9)
+            ax.tick_params(axis='y', labelsize=9)
+            ax.set_aspect('equal')
+
+        # Determine plot limits with padding
         mins = self.nodes.min(axis=0)
         maxs = self.nodes.max(axis=0)
         diff = (maxs - mins).min()
@@ -1188,48 +1378,7 @@ class Mesh:
         x_bot_lim = [mins[0], 0.0]
         y_lim = [mins[1], maxs[1]]
 
-        labelled_node = []
-        for i, ax in enumerate(axes):
-            for row, group_key in enumerate(keys):
-                group_lines = self.groups[group_key]
-                for idx, line_indices in enumerate(group_lines):
-                    if line_indices.shape[0] > 0:
-                        line_indices = np.array(line_indices, dtype=int)
-                        line_coords = self.nodes[line_indices]
-                        ax.plot(line_coords[:, 0], line_coords[:, 1], color=colours[row], marker='.', markersize=0.15,
-                                linestyle='-', linewidth=0.5, label=group_key if idx == 0 else None)
-                        if label:
-                            # LINE LABEL
-                            # Find the node inside the boundary and closest to the middle
-                            boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
-                            boundary_y_min, boundary_y_max = y_lim
-                            # Mask for nodes inside the boundary
-                            inside_mask = (
-                                (line_coords[:, 0] >= boundary_x_min) & (line_coords[:, 0] <= boundary_x_max) &
-                                (line_coords[:, 1] >= boundary_y_min) & (line_coords[:, 1] <= boundary_y_max)
-                            )
-                            if np.any(inside_mask):
-                                # Find the node closest to the mean of the inside nodes
-                                inside_coords = line_coords[inside_mask]
-                                center = np.mean(inside_coords, axis=0)
-                                squared_dists = np.sum((inside_coords - center)**2, axis=1)
-                                closest_idx = np.argmin(squared_dists)
-                                label_x, label_y = inside_coords[closest_idx]
-                                ax.text(label_x, label_y, f"l:{idx}", color=colours[row],
-                                        ha='center', va='top', fontsize=3)
-                            # NODE LABEL
-                            # Label each node in the line with its index in the line, but only once per node
-                            for node_idx, (x, y) in enumerate(line_coords[inside_mask]):
-                                global_node_idx = line_indices[inside_mask][node_idx]
-                                if global_node_idx not in labelled_node:
-                                    labelled_node.append(global_node_idx)
-                                    ax.text(x, y, f"{global_node_idx}", color='black', ha='center', va='bottom', fontsize=2)
-            ax.set_xlabel('$\\eta$-Axis', fontsize=9)
-            ax.set_ylabel('$\\zeta$-Axis', fontsize=9)
-            ax.tick_params(axis='x', labelsize=9)
-            ax.tick_params(axis='y', labelsize=9)
-            ax.set_aspect('equal')
-
+        # Set titles and limits
         axes[0].set_title('Top Surface', loc='left', fontsize=9)
         axes[1].set_title('Bottom Surface', loc='left', fontsize=9)
         axes[0].set_xlim(x_top_lim)
@@ -1241,274 +1390,123 @@ class Mesh:
         fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.95), ncol=len(labels), frameon=False)
 
         fig.tight_layout()
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
 
-    def plot_nodes_2D(self, filename: str, nset_keys: list[str] = [], label: bool = False):
-        """
-        Plots nodes from mesh.nodes or mesh.nsets. Optionally, only specified nset_keys are plotted.
-        Plots on two subplots (top/bottom surface), similar to plot_groups_2D.
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
-        Parameters:
-            filename (str): Output filename (without extension).
-            nset_keys (list[str], optional): List of nset keys to plot. If empty, plot all nodes.
-            label (bool): Whether to label the nodes with their index.
-        """
-        fig, axes = plt.subplots(2)
-        # Determine which nodes to plot
-        if nset_keys and all(k in self.nsets for k in nset_keys):
-            keys = nset_keys
-            nodes_by_key = {k: self.nodes[self.nsets[k]] for k in keys}
+        if show:
+            plt.show()
         else:
-            keys = ["all"]
-            nodes_by_key = {"all": self.nodes}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
+            plt.close()
 
-        mins = self.nodes.min(axis=0)
-        maxs = self.nodes.max(axis=0)
-        diff = (maxs - mins).min()
-        padding = 0.1 * diff  # 10% padding on each side
-        mins -= padding
-        maxs += padding
-        x_top_lim = [0.0, maxs[0]]
-        x_bot_lim = [mins[0], 0.0]
-        y_lim = [mins[1], maxs[1]]
-        for i, ax in enumerate(axes):
+    def plot_3D(self, keys: dict = {}, label: bool = False, save_path=None, show=False):
+        """
+        Plots the 3D nodes with options to plot nodes, beams and triangles.
+        """
+        def nodes(node_sets):
+            """
+            3D scatter plot of nodes.
+            """
+            # Determine which nodes to plot
+            if node_sets and all(k in self.nsets for k in node_sets):
+                keys = node_sets
+                nodes_by_key = {k: self.nodes[self.nsets[k]] for k in keys}
+            else:
+                keys = ["Nodes"]
+                nodes_by_key = {"Nodes": self.nodes}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
+
             for row, key in enumerate(keys):
                 nodes = nodes_by_key[key]
                 ax.scatter(
-                    nodes[:, 0], nodes[:, 1],
-                    color=colours[row], s=20, marker='.',
-                    label=key, alpha=0.6
+                    nodes[:, 0], nodes[:, 1], nodes[:, 2],
+                    color=colours[row], s=2, marker='.',
+                    alpha=0.6, label=key if row == 0 else None
                 )
                 if label:
-                    # LABEL NODES (inside boundary)
-                    boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
-                    boundary_y_min, boundary_y_max = y_lim
-                    inside_mask = (
-                        (nodes[:, 0] >= boundary_x_min) & (nodes[:, 0] <= boundary_x_max) &
-                        (nodes[:, 1] >= boundary_y_min) & (nodes[:, 1] <= boundary_y_max)
-                    )
-                    inside_nodes = nodes[inside_mask]
-                    for idx, (x, y) in enumerate(inside_nodes):
-                        ax.text(x, y, f"n:{idx}", color=colours[row],
-                                ha='center', va='bottom', fontsize=2)
-            ax.set_xlabel('$\\eta$-Axis', fontsize=9)
-            ax.set_ylabel('$\\zeta$-Axis', fontsize=9)
-            ax.tick_params(axis='x', labelsize=9)
-            ax.tick_params(axis='y', labelsize=9)
-            ax.set_aspect('equal')
+                    for idx, (x, y, z) in enumerate(nodes):
+                        ax.text(x, y, z, f"n:{idx}", color=colours[row], fontsize=6)
 
-        axes[0].set_title('Top Surface', loc='left', fontsize=9)
-        axes[1].set_title('Bottom Surface', loc='left', fontsize=9)
-        axes[0].set_xlim(x_top_lim)
-        axes[1].set_xlim(x_bot_lim)
-        axes[0].set_ylim(y_lim)
-        axes[1].set_ylim(y_lim)
+        def beams(beam_sets):
+            # Determine which beams to plot
+            if beam_sets and all(k in self.beam_sets for k in beam_sets):
+                keys = beam_sets
+                beams_by_key = {k: self.beams[self.beam_sets[k]] for k in keys}
+            else:
+                keys = ["Beams"]
+                beams_by_key = {"Beams": self.beams}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
 
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.925), ncol=len(labels), frameon=False)
-
-        fig.tight_layout()
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-
-    def plot_beams_2D(self, filename: str, beam_set_keys: list[str] = [], label: bool = False):
-        """
-        Plots beams from mesh.beams or mesh.beam_sets. Optionally, only specified beam_set_keys are plotted.
-        Plots on two subplots (top/bottom surface), similar to plot_groups_2D.
-
-        Parameters:
-            filename (str): Output filename (without extension).
-            beam_set_keys (list[str], optional): List of beam set keys to plot. If empty, plot all beams.
-            label (bool): Whether to label the beams with their index.
-        """
-        fig, axes = plt.subplots(2)
-        # Determine which beams to plot
-        if beam_set_keys and all(k in self.beam_sets for k in beam_set_keys):
-            keys = beam_set_keys
-            beams_by_key = {k: self.beams[self.beam_sets[k]] for k in keys}
-        else:
-            keys = ["all"]
-            beams_by_key = {"all": self.beams}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
-
-        mins = self.nodes.min(axis=0)
-        maxs = self.nodes.max(axis=0)
-        diff = (maxs - mins).min()
-        padding = 0.1 * diff  # 10% padding on each side
-        mins -= padding
-        maxs += padding
-        x_top_lim = [0.0, maxs[0]]
-        x_bot_lim = [mins[0], 0.0]
-        y_lim = [mins[1], maxs[1]]
-        for i, ax in enumerate(axes):
             for row, key in enumerate(keys):
                 beams = beams_by_key[key]
                 for idx, beam in enumerate(beams):
                     beam = np.array(beam, dtype=int)
                     beam_coords = self.nodes[beam]
                     ax.plot(
-                        beam_coords[:, 0], beam_coords[:, 1],
+                        beam_coords[:, 0], beam_coords[:, 1], beam_coords[:, 2],
                         color=colours[row], marker='.', markersize=0.5,
                         linestyle='-', linewidth=0.5, label=key if idx == 0 else None
                     )
                     if label:
-                        # LABEL BEAM (at midpoint inside boundary)
-                        boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
-                        boundary_y_min, boundary_y_max = y_lim
-                        inside_mask = (
-                            (beam_coords[:, 0] >= boundary_x_min) & (beam_coords[:, 0] <= boundary_x_max) &
-                            (beam_coords[:, 1] >= boundary_y_min) & (beam_coords[:, 1] <= boundary_y_max)
-                        )
-                        if np.any(inside_mask):
-                            inside_coords = beam_coords[inside_mask]
-                            center = np.mean(inside_coords, axis=0)
-                            label_x, label_y = center
-                            ax.text(label_x, label_y, f"b:{idx}", color=colours[row],
-                                    ha='center', va='top', fontsize=2)
-            ax.set_xlabel('$\\eta$-Axis', fontsize=9)
-            ax.set_ylabel('$\\zeta$-Axis', fontsize=9)
-            ax.tick_params(axis='x', labelsize=9)
-            ax.tick_params(axis='y', labelsize=9)
-            ax.set_aspect('equal')
+                        center = np.mean(beam_coords, axis=0)
+                        ax.text(center[0], center[1], center[2], f"b:{idx}", color=colours[row], fontsize=6)            
 
-        axes[0].set_title('Top Surface', loc='left', fontsize=9)
-        axes[1].set_title('Bottom Surface', loc='left', fontsize=9)
-        axes[0].set_xlim(x_top_lim)
-        axes[1].set_xlim(x_bot_lim)
-        axes[0].set_ylim(y_lim)
-        axes[1].set_ylim(y_lim)
+        def triangles(triangle_sets):
+            # Determine which triangles to plot
+            if triangle_sets and all(k in self.triangle_sets for k in triangle_sets):
+                keys = triangle_sets
+                triangles_by_key = {k: self.triangles[self.triangle_sets[k]] for k in keys}
+            else:
+                keys = ["Triangles"]
+                triangles_by_key = {"Triangles": self.triangles}
+            num_groups = len(keys)
+            cmap = plt.get_cmap('rainbow', num_groups)
+            colours = [cmap(i) for i in range(num_groups)]
 
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.925), ncol=len(labels), frameon=False)
-
-        fig.tight_layout()
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-
-    def plot_triangles_2D(self, filename: str, triangle_set_keys: list[str] = [], label: bool = False):
-        """
-        Plots triangles from mesh.triangles or mesh.triangle_sets. Optionally, only specified triangle_set_keys are plotted.
-        Plots on two subplots (top/bottom surface), similar to plot_groups_2D.
-
-        Parameters:
-            filename (str): Output filename (without extension).
-            triangle_set_keys (list[str], optional): List of triangle set keys to plot. If empty, plot all triangles.
-            label (bool): Whether to label the triangles with their index.
-        """
-
-        fig, axes = plt.subplots(2)
-        # Determine which triangles to plot
-        if triangle_set_keys and all(k in self.triangle_sets for k in triangle_set_keys):
-            keys = triangle_set_keys
-            triangles_by_key = {k: self.triangles[self.triangle_sets[k]] for k in keys}
-        else:
-            keys = ["all"]
-            triangles_by_key = {"all": self.triangles}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
-
-        mins = self.nodes.min(axis=0)
-        maxs = self.nodes.max(axis=0)
-        diff = (maxs - mins).min()
-        padding = 0.1 * diff  # 10% padding on each side
-        mins -= padding
-        maxs += padding
-        x_top_lim = [0.0, maxs[0]]
-        x_bot_lim = [mins[0], 0.0]
-        y_lim = [mins[1], maxs[1]]
-        for i, ax in enumerate(axes):
+            points = []
             for row, key in enumerate(keys):
                 triangles = triangles_by_key[key]
                 for idx, triangle in enumerate(triangles):
-                    pts = self.nodes[triangle][:, :2]
-                    polygon = patches.Polygon(
-                        pts,
-                        closed=True,
-                        facecolor=colours[row],
-                        alpha=0.2,
-                        edgecolor='k',
-                        linewidth=0.5,
-                        label=key if idx == 0 else None
+                    pts = self.nodes[triangle]
+                    ax.plot_trisurf(
+                        pts[:, 0], pts[:, 1], pts[:, 2],
+                        color=colours[row], alpha=0.3, edgecolor='k', linewidth=0.5, label=key if idx == 0 else None
                     )
-                    ax.add_patch(polygon)
+                    points.extend(pts)
                     if label:
-                        # LABEL TRIANGLE (at centroid if inside boundary)
-                        boundary_x_min, boundary_x_max = x_top_lim if i == 0 else x_bot_lim
-                        boundary_y_min, boundary_y_max = y_lim
                         centroid = np.mean(pts, axis=0)
-                        if (
-                            (centroid[0] >= boundary_x_min) and (centroid[0] <= boundary_x_max) and
-                            (centroid[1] >= boundary_y_min) and (centroid[1] <= boundary_y_max)
-                        ):
-                            ax.text(centroid[0], centroid[1], f"t:{idx}", color=colours[row],
-                                    ha='center', va='center', fontsize=2)
-            ax.set_xlabel('$\\eta$-Axis', fontsize=9)
-            ax.set_ylabel('$\\zeta$-Axis', fontsize=9)
-            ax.tick_params(axis='x', labelsize=9)
-            ax.tick_params(axis='y', labelsize=9)
-            ax.set_aspect('equal')
-            ax.autoscale()
+                        ax.text(centroid[0], centroid[1], centroid[2], f"t:{idx}", color=colours[row], fontsize=6)
 
-        axes[0].set_title('Top Surface', loc='left', fontsize=9)
-        axes[1].set_title('Bottom Surface', loc='left', fontsize=9)
-        axes[0].set_xlim(x_top_lim)
-        axes[1].set_xlim(x_bot_lim)
-        axes[0].set_ylim(y_lim)
-        axes[1].set_ylim(y_lim)
-
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.925), ncol=len(labels), frameon=False)
-
-        fig.tight_layout()
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-
-    def plot_nodes_3D(self, filename: str, nset_keys: list[str] = [], label: bool = False):
-        """
-        Plots 3D nodes from mesh.nodes or mesh.nsets. Optionally, only specified nset_keys are plotted.
-
-        Parameters:
-            filename (str): Output filename (without extension).
-            nset_keys (list[str], optional): List of nset keys to plot. If empty, plot all nodes.
-            label (bool): Whether to label the nodes with their index.
-        """
         fig = plt.figure(figsize=(7.5,4))
         ax = fig.add_subplot(111, projection='3d')
-        # Determine which nodes to plot
-        if nset_keys and all(k in self.nsets for k in nset_keys):
-            keys = nset_keys
-            nodes_by_key = {k: self.nodes[self.nsets[k]] for k in keys}
-        else:
-            keys = ["all"]
-            nodes_by_key = {"all": self.nodes}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
 
-        points = []
-        for row, key in enumerate(keys):
-            nodes = nodes_by_key[key]
-            ax.scatter(
-                nodes[:, 0], nodes[:, 1], nodes[:, 2],
-                color=colours[row], s=2, marker='.',
-                alpha=0.6, label=key if row == 0 else None
-            )
-            points.extend(nodes)
-            if label:
-                for idx, (x, y, z) in enumerate(nodes):
-                    ax.text(x, y, z, f"n:{idx}", color=colours[row], fontsize=6)
-            
-        points = np.array(points)
-        ax.yaxis.set_ticks(np.arange(np.min(points[:,1]), np.max(points[:,1])+0.01, 0.2))
-        ax.zaxis.set_ticks(np.arange(-0.1, 0.1 +0.01, 0.1))
+        try:
+            node_sets = keys["node_sets"]
+            nodes(node_sets)
+        except KeyError:
+            pass
+
+        try:
+            beam_sets = keys["beam_sets"]
+            beams(beam_sets)
+        except KeyError:
+            pass
+
+        try:
+            triangle_sets = keys["triangle_sets"]
+            triangles(triangle_sets)
+        except KeyError:
+            pass
 
         # decorations
-        ax.set_xlabel("Chord, X", fontsize=9)
-        ax.set_ylabel("Span, Y", fontsize=9)
-        ax.set_zlabel("Thickness, Z", fontsize=9)
+        ax.set_xlabel("X [m]", fontsize=9)
+        ax.set_ylabel("Y [m]", fontsize=9)
+        ax.set_zlabel("Z [m]", fontsize=9)
         ax.tick_params(axis='x', labelsize=8)
         ax.tick_params(axis='y', labelsize=8)
         ax.tick_params(axis='z', labelsize=8)
@@ -1517,376 +1515,266 @@ class Mesh:
         handles, labels = ax.get_legend_handles_labels()
         fig.legend(handles, labels, loc='upper right',fontsize=9, bbox_to_anchor=(1, 1), ncol=len(labels), frameon=False)
 
-        ax.set_box_aspect((np.ptp(points[:,0]),np.ptp(points[:,1]),np.ptp(points[:,2]),), zoom=1.1) 
+        ax.yaxis.set_ticks(np.arange(np.min(self.nodes[:,1]), np.max(self.nodes[:,1])+0.01, 0.2))
+        ax.zaxis.set_ticks(np.arange(-0.1, 0.1 +0.01, 0.1))
+        ax.set_box_aspect((np.ptp(self.nodes[:,0]),np.ptp(self.nodes[:,1]),np.ptp(self.nodes[:,2]),), zoom=1.1) 
         plt.subplots_adjust(top = 1, bottom = 0, right = 1.15, left = 0, hspace = 0, wspace = 0)
 
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-        plt.close(fig)
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
-    def plot_beams_3D(self, filename: str, beam_set_keys: list[str] = [], label: bool = False):
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    def write_mesh(self, filename: str, FR_INPUTS: dict, UC_INPUTS: dict):
         """
-        Plots 3D beams from mesh.beams or mesh.beam_sets. Optionally, only specified beam_set_keys are plotted.
+        Writes the mesh to a file using the specified serialization method.
 
         Parameters:
-            filename (str): Output filename (without extension).
-            beam_set_keys (list[str], optional): List of beam set keys to plot. If empty, plot all beams.
-            label (bool): Whether to label the beams with their index.
+            filename (str): The base file path (without extension) where the mesh will be saved.
         """
-        fig = plt.figure(figsize=(7.5, 4))
-        ax = fig.add_subplot(111, projection='3d')
-        # Determine which beams to plot
-        if beam_set_keys and all(k in self.beam_sets for k in beam_set_keys):
-            keys = beam_set_keys
-            beams_by_key = {k: self.beams[self.beam_sets[k]] for k in keys}
+        def format_lines(data_list, items_per_line=16):
+            lines : list[str] = []
+            for i in range(0, len(data_list), items_per_line):
+                chunk = data_list[i:i + items_per_line]
+                lines.append(", ".join(map(str, chunk)) + ("," if i + items_per_line < len(data_list) else ""))
+            return lines
+
+        lines = []
+
+        # nodes
+        lines.append("*NODE")
+        for i, node in enumerate(self.nodes):
+            i = i + 1  # Abaqus uses 1-based indexing
+            lines.append("%i, %f, %f, %f" % (i, *node))
+
+        # beams
+        lines.append("*ELEMENT, TYPE=%s" % ("B31"))
+        for i, beam in enumerate(self.beams):
+            i = i + 1  # Abaqus uses 1-based indexing
+            beam = beam + 1  # Abaqus uses 1-based indexing
+            lines.append("%i, %i, %i" % (i, beam[0], beam[1]))
+
+        # triangles
+        num_beam_elements = self.beams.shape[0]
+        lines.append("*ELEMENT, TYPE=%s" % ("S3"))
+        # outside
+        for i, triangle in enumerate(self.triangles):
+            i = i + 1 + num_beam_elements # Abaqus uses 1-based indexing
+            triangle = triangle + 1  # Abaqus uses 1-based indexing
+            lines.append("%i, %i, %i, %i" % (i, triangle[0], triangle[1], triangle[2]))
+        # inside
+        num_triangles = self.triangles.shape[0]
+        for i, triangle in enumerate(self.triangles):
+            i = i + 1 + num_beam_elements + num_triangles
+            triangle = triangle + 1
+            lines.append("%i, %i, %i, %i" % (i, triangle[0], triangle[1], triangle[2]))
+
+        # node sets
+        for set_name, set_items in self.nsets.items():
+            lines.append("*NSET, NSET=%s" % (set_name))
+            set_items = set_items + 1  # Abaqus uses 1-based indexing
+            lines.extend(format_lines(set_items))
+        # beam sets
+        for set_name, set_items in self.beam_sets.items():
+            set_items = set_items + 1  # Abaqus uses 1-based indexing
+            lines.append("*ELSET, ELSET=%s" % (set_name))
+            lines.extend(format_lines(set_items))
+        # triangle sets
+        # outside
+        lines.append("*ELSET, ELSET=SHELL_OUTSIDE")
+        lines.extend(format_lines(np.arange(num_triangles).astype(int) + 1 + num_beam_elements))
+        # inside
+        lines.append("*ELSET, ELSET=SHELL_INSIDE")
+        lines.extend(format_lines(np.arange(num_triangles).astype(int) + 1 + num_beam_elements + num_triangles))
+        # all shell elements
+        lines.append("*ELSET, ELSET=SHELL")
+        lines.extend(format_lines(np.arange(1 + num_beam_elements,num_triangles*2 + 1).astype(int)))
+
+        # surfaces
+        lines.append("*SURFACE, TYPE=ELEMENT, NAME=SHELL_OUTSIDE_SURF")
+        lines.append("SHELL_OUTSIDE, SPOS")
+
+        # dimensions
+        dimensions = {
+            "RIBS" : [UC_INPUTS['RIB_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
+            "TE" : UC_INPUTS["TE_DIMENSIONS"], # NOTE: Flat TE cross-section
+            "STRINGERS" : [UC_INPUTS['RIB_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
+            "CHEVRONS" : [UC_INPUTS['CHEVRON_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
+        }
+        # section
+        for section in ["RIBS", "STRINGERS", "CHEVRONS"]: # Fairing
+            lines.append("*BEAM SECTION, ELSET=%s, MATERIAL=MATERIAL_CORE, SECTION=RECT"%(section))
+            lines.append("%f, %f"%tuple(dimensions[section]))
+            lines.append("0, 1, 0")
+        for section in ["TE"]: # Trailing Edge
+            lines.append("*BEAM SECTION, ELSET=%s, MATERIAL=MATERIAL_FACESHEET, SECTION=RECT"%(section))
+            lines.append("%f, %f"%tuple(dimensions[section]))
+            lines.append("1, 0, 0")
+
+        # facesheet section
+        # outside
+        offset = (UC_INPUTS["FACESHEET_THICKNESS"] + UC_INPUTS["CORE_THICKNESS"]) / (2.0 * UC_INPUTS["FACESHEET_THICKNESS"])
+        lines.append("*SHELL SECTION, ELSET=SHELL_OUTSIDE, MATERIAL=MATERIAL_FACESHEET, OFFSET=%f"%(-offset))
+        lines.append("%f, 5" % UC_INPUTS["FACESHEET_THICKNESS"])  # THICKNESS
+        # inside
+        lines.append("*SHELL SECTION, ELSET=SHELL_INSIDE, MATERIAL=MATERIAL_FACESHEET, OFFSET=%f"%(offset))
+        lines.append("%f, 5" % UC_INPUTS["FACESHEET_THICKNESS"])  # THICKNESS
+
+        # material properties
+        for key in ["MATERIAL_CORE", "MATERIAL_FACESHEET"]:
+            lines.append("*MATERIAL, NAME=%s" % key)
+            lines.append("*ELASTIC")
+            lines.append("%f, %f " % tuple(item for item in UC_INPUTS[key]))
+            lines.extend(["*DENSITY", "1"])
+
+        # rigid body ribs
+        lines.append("*RIGID BODY, REF NODE=ANODE_1, TIE NSET=RIB_1")
+        lines.append("*RIGID BODY, REF NODE=ANODE_2, TIE NSET=RIB_2")
+
+        # Initial boundary conditions
+        lines.append("*BOUNDARY")
+        lines.append("ANODE_1, ENCASTRE") # FIXING ANCHOR NODE 1
+        if FR_INPUTS['PRE_STRAIN_ACROSS_HINGE']!=0.0: # Assuming model is a symmetric half-model
+            for dof in [1, 3, 5, 6]:
+                lines.append("ANODE_2, %i, %i"%(dof, dof))
         else:
-            keys = ["all"]
-            beams_by_key = {"all": self.beams}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
+            lines.append("ANODE_2, 1, 3")
+            lines.append("ANODE_2, 5, 6")
 
-        points = []
-        for row, key in enumerate(keys):
-            beams = beams_by_key[key]
-            for idx, beam in enumerate(beams):
-                beam = np.array(beam, dtype=int)
-                beam_coords = self.nodes[beam]
-                ax.plot(
-                    beam_coords[:, 0], beam_coords[:, 1], beam_coords[:, 2],
-                    color=colours[row], marker='.', markersize=0.5,
-                    linestyle='-', linewidth=0.5, label=key if idx == 0 else None
-                )
-                points.extend(beam_coords)
-                if label:
-                    center = np.mean(beam_coords, axis=0)
-                    ax.text(center[0], center[1], center[2], f"b:{idx}", color=colours[row], fontsize=6)
+        # output requests
+        Output_Requests = [
+            "*OUTPUT, FIELD", # FIELD OUTPUT
+            "*ELEMENT OUTPUT, ELSET=SHELL, DIRECTION=YES",
+            "SE, SF", # SECTION STRAIN & FORCE FOR ELEMENT
+            "*OUTPUT, HISTORY", # HISTORY OUTPUT
+            "*NODE OUTPUT, NSET=ANODE_2", # ANCHOR NODE 2
+            "RF, RM, U, UR", #  MOMENTS AND ROATIONS IN GLOBAL X AND Y
+            "*OUTPUT, FIELD, VAR=PRESELECT",
+            "*OUTPUT, HISTORY, VAR=PRESELECT",
+        ]
+        Output_Requested = False
 
-        points = np.array(points)
-        ax.yaxis.set_ticks(np.arange(np.min(points[:,1]), np.max(points[:,1])+0.01, 0.2))
-        ax.zaxis.set_ticks(np.arange(-0.1, 0.1 +0.01, 0.1))
+        # Adding step: Pre-strain
+        PreStrain = FR_INPUTS["PRE_STRAIN_ACROSS_HINGE"]
+        Span = FR_INPUTS["SPAN"]
+        Multiplier = 1/2 if FR_INPUTS['MODEL_SCALE'] == "HALF" else 1
+        if FR_INPUTS['PRE_STRAIN_ACROSS_HINGE']!=0.0:
+            if FR_INPUTS['SOLVER']=='NEWTON':
+                lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
+                lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+                lines.append("1, 1, 1E-9, 1")
+                lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+            elif FR_INPUTS['SOLVER']=='LINEAR':
+                lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=NO, INC=500")
+                lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+                lines.append("1, 1, 1E-9, 1")
+                lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+            elif FR_INPUTS['SOLVER']=='RIKS':
+                lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
+                lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
+                lines.append("1, , 1E-9, 1, , ANODE_2, 4, %f" % (FR_INPUTS['FOLDING_ANGLE_X']))
+                # LOADING : FOLDING
+                lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+            elif FR_INPUTS['SOLVER']=='DYNAMIC':
+                lines.append("*AMPLITUDE, NAME=AMP-1, DEFINITION=SMOOTH STEP")
+                lines.append("0, 0, 1, 1")
+                lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
+                lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
+                lines.append("1, 1, 1E-9, 1")
+                lines.append("*BOUNDARY, AMPLITUDE=AMP-1") # DYNAMIC, IMPLICIT
+            else:
+                raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
+            # LOADING VALUE
+            lines.append("ANODE_2, 2, 2, %f"%(PreStrain*Span*Multiplier))
+            # OUTPUT REQUESTS
+            if not Output_Requested:
+                lines.extend(Output_Requests)
+                Output_Requested = True
+            lines.append("*END STEP")
 
-        # decorations
-        ax.set_xlabel("Chord, X", fontsize=9)
-        ax.set_ylabel("Span, Y", fontsize=9)
-        ax.set_zlabel("Thickness, Z", fontsize=9)
-        ax.tick_params(axis='x', labelsize=8)
-        ax.tick_params(axis='y', labelsize=8)
-        ax.tick_params(axis='z', labelsize=8)
-        ax.xaxis.labelpad = 25
-
-        handles, labels = ax.get_legend_handles_labels()
-        fig.legend(handles, labels, loc='upper right',fontsize=9, bbox_to_anchor=(1, 1), ncol=len(labels), frameon=False)
-
-        ax.set_box_aspect((np.ptp(points[:,0]),np.ptp(points[:,1]),np.ptp(points[:,2]),), zoom=1.1) 
-        plt.subplots_adjust(top = 1, bottom = 0, right = 1.15, left = 0, hspace = 0, wspace = 0)
-
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-        plt.close(fig)
-
-    def plot_triangles_3D(self, filename: str, triangle_set_keys: list[str] = [], label: bool = False):
-        """
-        Plots 3D triangles from mesh.triangles or mesh.triangle_sets. Optionally, only specified triangle_set_keys are plotted.
-
-        Parameters:
-            filename (str): Output filename (without extension).
-            triangle_set_keys (list[str], optional): List of triangle set keys to plot. If empty, plot all triangles.
-            label (bool): Whether to label the triangles with their index.
-        """
-        fig = plt.figure(figsize=(7.5, 4))
-        ax = fig.add_subplot(111, projection='3d')
-        # Determine which triangles to plot
-        if triangle_set_keys and all(k in self.triangle_sets for k in triangle_set_keys):
-            keys = triangle_set_keys
-            triangles_by_key = {k: self.triangles[self.triangle_sets[k]] for k in keys}
+        # ADDING STEP : PRESSURE STEP
+        if FR_INPUTS['SOLVER']=='NEWTON':
+            lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
+            lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+            lines.append("1, 1, 1E-9, 1")
+            lines.append("*DSLOAD")
+        elif FR_INPUTS['SOLVER']=='LINEAR':
+            lines.append("*STEP, NAME=PRESSURE, NLGEOM=NO, INC=500")
+            lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+            lines.append("1, 1, 1E-9, 1")
+            lines.append("*DSLOAD")
+        elif FR_INPUTS['SOLVER']=='RIKS':
+            lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
+            lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
+            lines.append("1, , 1E-9, 1, , ANODE_2, 4, %f" % (FR_INPUTS['FOLDING_ANGLE_X']))
+            # LOADING : FOLDING
+            lines.append("*DSLOAD")
+        elif FR_INPUTS['SOLVER']=='DYNAMIC':
+            lines.append("*AMPLITUDE, NAME=AMP-1, DEFINITION=SMOOTH STEP")
+            lines.append("0, 0, 1, 1")
+            lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
+            lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
+            lines.append("1, 1, 1E-9, 1")
+            lines.append("*DSLOAD, AMPLITUDE=AMP-1") # DYNAMIC, IMPLICIT
         else:
-            keys = ["all"]
-            triangles_by_key = {"all": self.triangles}
-        num_groups = len(keys)
-        cmap = plt.get_cmap('rainbow', num_groups)
-        colours = [cmap(i) for i in range(num_groups)]
+            raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
+        # LOADING VALUE
+        lines.append("SHELL_OUTSIDE_SURF, P, %f" % (-11866.000000)) # FIXME: Pressure value
+        # OUTPUT REQUESTS
+        if not Output_Requested:
+            lines.extend(Output_Requests)
+            Output_Requested = True
+        lines.append("*END STEP")
 
-        points = []
-        for row, key in enumerate(keys):
-            triangles = triangles_by_key[key]
-            for idx, triangle in enumerate(triangles):
-                pts = self.nodes[triangle]
-                ax.plot_trisurf(
-                    pts[:, 0], pts[:, 1], pts[:, 2],
-                    color=colours[row], alpha=0.3, edgecolor='k', linewidth=0.5, label=key if idx == 0 else None
-                )
-                points.extend(pts)
-                if label:
-                    centroid = np.mean(pts, axis=0)
-                    ax.text(centroid[0], centroid[1], centroid[2], f"t:{idx}", color=colours[row], fontsize=6)
+        # ADDING STEP : FOLDING STEP
+        # Defining increments to ensure all sampling angle are found
+        if len(FR_INPUTS['SAMPLING_ROTATIONS'])!=0:
+            max_increment = np.gcd.reduce(np.asarray(FR_INPUTS['SAMPLING_ROTATIONS']))/(FR_INPUTS['FOLDING_ANGLE_HINGE']*Multiplier)
+        else: max_increment = 0.1
+        refiner = 0.01 if all([int(FILE_ID)==0,int(ITERATION_ID)==0]) else 0.1 # reducing stepsize in dynamic analysis
+        # Defining Folding Step
+        if FR_INPUTS['SOLVER']=='NEWTON':
+            lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
+            lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+            lines.append("%f, 1, 1E-9, %f"%(max_increment,max_increment))
+            lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+        elif FR_INPUTS['SOLVER']=='LINEAR':
+            lines.append("*STEP, NAME=FOLDING, NLGEOM=NO, INC=1000")
+            lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
+            lines.append("%f, 1, 1E-9, %f"%(max_increment,max_increment))
+            lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+        elif FR_INPUTS['SOLVER']=='RIKS':
+            lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
+            lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
+            lines.append("%f, , 1E-9, %f, , ANODE_2, 4, %f" % (max_increment, max_increment, FR_INPUTS['FOLDING_ANGLE_X']))
+            # LOADING : FOLDING
+            lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+        elif FR_INPUTS['SOLVER']=='DYNAMIC':
+            lines.append("*AMPLITUDE, NAME=AMP-2, DEFINITION=SMOOTH STEP")
+            lines.append("0, 0, 1, 1")
+            lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
+            lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
+            lines.append(" %f, 1, 1E-9, %f"%(max_increment*refiner,max_increment*refiner))
+            lines.append("*BOUNDARY, AMPLITUDE=AMP-2") # DYNAMIC, IMPLICIT
+        else:
+            raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
+        # LOADING VALUE
+        lines.append("ANODE_2, 4, 4, %f" %
+            (FR_INPUTS['FOLDING_ANGLE_X']/2.0 if FR_INPUTS['MODEL_SCALE'] == "HALF" else FR_INPUTS['FOLDING_ANGLE_X'])
+        )
+        # OUTPUT REQUESTS
+        if not Output_Requested:
+            lines.extend(Output_Requests)
+            Output_Requested = True
+        lines.append("*END STEP")
 
-        points = np.array(points)
-        ax.yaxis.set_ticks(np.arange(np.min(points[:,1]), np.max(points[:,1])+0.01, 0.2))
-        ax.zaxis.set_ticks(np.arange(-0.1, 0.1 +0.01, 0.1))
-
-        # decorations
-        ax.set_xlabel("Chord, X", fontsize=9)
-        ax.set_ylabel("Span, Y", fontsize=9)
-        ax.set_zlabel("Thickness, Z", fontsize=9)
-        ax.tick_params(axis='x', labelsize=8)
-        ax.tick_params(axis='y', labelsize=8)
-        ax.tick_params(axis='z', labelsize=8)
-        ax.xaxis.labelpad = 25
-
-        handles, labels = ax.get_legend_handles_labels()
-        fig.legend(handles, labels, loc='upper right',fontsize=9, bbox_to_anchor=(1, 1), ncol=len(labels), frameon=False)
-
-        ax.set_box_aspect((np.ptp(points[:,0]),np.ptp(points[:,1]),np.ptp(points[:,2]),), zoom=1.1) 
-        plt.subplots_adjust(top = 1, bottom = 0, right = 1.15, left = 0, hspace = 0, wspace = 0)
-
-        plt.savefig(filename + '.svg', bbox_inches='tight', dpi=300)
-        plt.close(fig)
-
-    # def write_mesh(self, filename: str, FR_INPUTS: dict, UC_INPUTS: dict):
-    #     """
-    #     Writes the mesh to a file using the specified serialization method.
-
-    #     Parameters:
-    #         filename (str): The base file path (without extension) where the mesh will be saved.
-    #     """
-    #     def format_lines(data_list, items_per_line=16):
-    #         lines : list[str] = []
-    #         for i in range(0, len(data_list), items_per_line):
-    #             chunk = data_list[i:i + items_per_line]
-    #             lines.append(", ".join(map(str, chunk)) + ("," if i + items_per_line < len(data_list) else ""))
-    #         return lines
-
-    #     lines = []
-
-    #     # nodes
-    #     lines.append("*NODE")
-    #     for i, node in enumerate(self.nodes):
-    #         i = i + 1  # Abaqus uses 1-based indexing
-    #         lines.append("%i, %f, %f, %f" % (i, *node))
-
-    #     # beams
-    #     lines.append("*ELEMENT, TYPE=%s" % ("B31"))
-    #     for i, beam in enumerate(self.beams):
-    #         i = i + 1  # Abaqus uses 1-based indexing
-    #         beam = beam + 1  # Abaqus uses 1-based indexing
-    #         lines.append("%i, %i, %i" % (i, beam[0], beam[1]))
-
-    #     # triangles
-    #     num_beam_elements = self.beams.shape[0]
-    #     lines.append("*ELEMENT, TYPE=%s" % ("S3"))
-    #     # outside
-    #     for i, triangle in enumerate(self.triangles):
-    #         i = i + 1 + num_beam_elements # Abaqus uses 1-based indexing
-    #         triangle = triangle + 1  # Abaqus uses 1-based indexing
-    #         lines.append("%i, %i, %i, %i" % (i, triangle[0], triangle[1], triangle[2]))
-    #     # inside
-    #     num_triangles = self.triangles.shape[0]
-    #     for i, triangle in enumerate(self.triangles):
-    #         i = i + 1 + num_beam_elements + num_triangles
-    #         triangle = triangle + 1
-    #         lines.append("%i, %i, %i, %i" % (i, triangle[0], triangle[1], triangle[2]))
-
-    #     # node sets
-    #     for set_name, set_items in self.nsets.items():
-    #         lines.append("*NSET, NSET=%s" % (set_name))
-    #         set_items = set_items + 1  # Abaqus uses 1-based indexing
-    #         lines.extend(format_lines(set_items))
-    #     # beam sets
-    #     for set_name, set_items in self.beam_sets.items():
-    #         set_items = set_items + 1  # Abaqus uses 1-based indexing
-    #         lines.append("*ELSET, ELSET=%s" % (set_name))
-    #         lines.extend(format_lines(set_items))
-    #     # triangle sets
-    #     # outside
-    #     lines.append("*ELSET, ELSET=SHELL_OUTSIDE")
-    #     lines.extend(format_lines(np.arange(num_triangles).astype(int) + 1 + num_beam_elements))
-    #     # inside
-    #     lines.append("*ELSET, ELSET=SHELL_INSIDE")
-    #     lines.extend(format_lines(np.arange(num_triangles).astype(int) + 1 + num_beam_elements + num_triangles))
-    #     # all shell elements
-    #     lines.append("*ELSET, ELSET=SHELL")
-    #     lines.extend(format_lines(np.arange(1 + num_beam_elements,num_triangles*2 + 1).astype(int)))
-
-    #     # surfaces
-    #     lines.append("*SURFACE, TYPE=ELEMENT, NAME=SHELL_OUTSIDE_SURF")
-    #     lines.append("SHELL_OUTSIDE, SPOS")
-
-    #     # dimensions
-    #     dimensions = {
-    #         "RIBS" : [UC_INPUTS['RIB_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
-    #         "TE" : UC_INPUTS["TE_DIMENSIONS"], # NOTE: Flat TE cross-section
-    #         "STRINGERS" : [UC_INPUTS['RIB_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
-    #         "CHEVRONS" : [UC_INPUTS['CHEVRON_THICKNESS'], UC_INPUTS["CORE_THICKNESS"]],
-    #     }
-    #     # section
-    #     for section in ["RIBS", "STRINGERS", "CHEVRONS"]: # Fairing
-    #         lines.append("*BEAM SECTION, ELSET=%s, MATERIAL=MATERIAL_CORE, SECTION=RECT"%(section))
-    #         lines.append("%f, %f"%tuple(dimensions[section]))
-    #         lines.append("0, 1, 0")
-    #     for section in ["TE"]: # Trailing Edge
-    #         lines.append("*BEAM SECTION, ELSET=%s, MATERIAL=MATERIAL_FACESHEET, SECTION=RECT"%(section))
-    #         lines.append("%f, %f"%tuple(dimensions[section]))
-    #         lines.append("1, 0, 0")
-
-    #     # facesheet section
-    #     # outside
-    #     offset = (UC_INPUTS["FACESHEET_THICKNESS"] + UC_INPUTS["CORE_THICKNESS"]) / (2.0 * UC_INPUTS["FACESHEET_THICKNESS"])
-    #     lines.append("*SHELL SECTION, ELSET=SHELL_OUTSIDE, MATERIAL=MATERIAL_FACESHEET, OFFSET=%f"%(-offset))
-    #     lines.append("%f, 5" % UC_INPUTS["FACESHEET_THICKNESS"])  # THICKNESS
-    #     # inside
-    #     lines.append("*SHELL SECTION, ELSET=SHELL_INSIDE, MATERIAL=MATERIAL_FACESHEET, OFFSET=%f"%(offset))
-    #     lines.append("%f, 5" % UC_INPUTS["FACESHEET_THICKNESS"])  # THICKNESS
-
-    #     # material properties
-    #     for key in ["MATERIAL_CORE", "MATERIAL_FACESHEET"]:
-    #         lines.append("*MATERIAL, NAME=%s" % key)
-    #         lines.append("*ELASTIC")
-    #         lines.append("%f, %f " % tuple(item for item in UC_INPUTS[key]))
-    #         lines.extend(["*DENSITY", "1"])
-
-    #     # rigid body ribs
-    #     lines.append("*RIGID BODY, REF NODE=ANODE_1, TIE NSET=RIB_1")
-    #     lines.append("*RIGID BODY, REF NODE=ANODE_2, TIE NSET=RIB_2")
-
-    #     # Initial boundary conditions
-    #     lines.append("*BOUNDARY")
-    #     lines.append("ANODE_1, ENCASTRE") # FIXING ANCHOR NODE 1
-    #     if FR_INPUTS['PRE_STRAIN_ACROSS_HINGE']!=0.0: # Assuming model is a symmetric half-model
-    #         for dof in [1, 3, 5, 6]:
-    #             lines.append("ANODE_2, %i, %i"%(dof, dof))
-    #     else:
-    #         lines.append("ANODE_2, 1, 3")
-    #         lines.append("ANODE_2, 5, 6")
-
-    #     # output requests
-    #     Output_Requests = [
-    #         "*OUTPUT, FIELD", # FIELD OUTPUT
-    #         "*ELEMENT OUTPUT, ELSET=SHELL, DIRECTION=YES",
-    #         "SE, SF", # SECTION STRAIN & FORCE FOR ELEMENT
-    #         "*OUTPUT, HISTORY", # HISTORY OUTPUT
-    #         "*NODE OUTPUT, NSET=ANODE_2", # ANCHOR NODE 2
-    #         "RF, RM, U, UR", #  MOMENTS AND ROATIONS IN GLOBAL X AND Y
-    #         "*OUTPUT, FIELD, VAR=PRESELECT",
-    #         "*OUTPUT, HISTORY, VAR=PRESELECT",
-    #     ]
-    #     Output_Requested = False
-
-    #     # Adding step: Pre-strain
-    #     PreStrain = FR_INPUTS["PRE_STRAIN_ACROSS_HINGE"]
-    #     Span = FR_INPUTS["SPAN"]
-    #     Multiplier = 1/2 if FR_INPUTS['MODEL_SCALE'] == "HALF" else 1
-    #     if FR_INPUTS['PRE_STRAIN_ACROSS_HINGE']!=0.0:
-    #         if FR_INPUTS['SOLVER']=='NEWTON':
-    #             lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
-    #             lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #             lines.append("1, 1, 1E-9, 1")
-    #             lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #         elif FR_INPUTS['SOLVER']=='LINEAR':
-    #             lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=NO, INC=500")
-    #             lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #             lines.append("1, 1, 1E-9, 1")
-    #             lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #         elif FR_INPUTS['SOLVER']=='RIKS':
-    #             lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
-    #             lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
-    #             lines.append("1, , 1E-9, 1, , ANODE_2, 4, %f" % (FR_INPUTS['FOLDING_ANGLE_X']))
-    #             # LOADING : FOLDING
-    #             lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #         elif FR_INPUTS['SOLVER']=='DYNAMIC':
-    #             lines.append("*AMPLITUDE, NAME=AMP-1, DEFINITION=SMOOTH STEP")
-    #             lines.append("0, 0, 1, 1")
-    #             lines.append("*STEP, NAME=PRESTRAIN, NLGEOM=YES, INC=500")
-    #             lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
-    #             lines.append("1, 1, 1E-9, 1")
-    #             lines.append("*BOUNDARY, AMPLITUDE=AMP-1") # DYNAMIC, IMPLICIT
-    #         else:
-    #             raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
-    #         # LOADING VALUE
-    #         lines.append("ANODE_2, 2, 2, %f"%(PreStrain*Span*Multiplier))
-    #         # OUTPUT REQUESTS
-    #         if not Output_Requested:
-    #             lines.extend(Output_Requests)
-    #             Output_Requested = True
-    #         lines.append("*END STEP")
-
-    #     # ADDING STEP : PRESSURE STEP
-    #     if FR_INPUTS['SOLVER']=='NEWTON':
-    #         lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
-    #         lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #         lines.append("1, 1, 1E-9, 1")
-    #         lines.append("*DSLOAD")
-    #     elif FR_INPUTS['SOLVER']=='LINEAR':
-    #         lines.append("*STEP, NAME=PRESSURE, NLGEOM=NO, INC=500")
-    #         lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #         lines.append("1, 1, 1E-9, 1")
-    #         lines.append("*DSLOAD")
-    #     elif FR_INPUTS['SOLVER']=='RIKS':
-    #         lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
-    #         lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
-    #         lines.append("1, , 1E-9, 1, , ANODE_2, 4, %f" % (FR_INPUTS['FOLDING_ANGLE_X']))
-    #         # LOADING : FOLDING
-    #         lines.append("*DSLOAD")
-    #     elif FR_INPUTS['SOLVER']=='DYNAMIC':
-    #         lines.append("*AMPLITUDE, NAME=AMP-1, DEFINITION=SMOOTH STEP")
-    #         lines.append("0, 0, 1, 1")
-    #         lines.append("*STEP, NAME=PRESSURE, NLGEOM=YES, INC=500")
-    #         lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
-    #         lines.append("1, 1, 1E-9, 1")
-    #         lines.append("*DSLOAD, AMPLITUDE=AMP-1") # DYNAMIC, IMPLICIT
-    #     else:
-    #         raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
-    #     # LOADING VALUE
-    #     lines.append("SHELL_OUTSIDE_SURF, P, %f" % (-11866.000000)) # FIXME: Pressure value
-    #     # OUTPUT REQUESTS
-    #     if not Output_Requested:
-    #         lines.extend(Output_Requests)
-    #         Output_Requested = True
-    #     lines.append("*END STEP")
-
-    #     # ADDING STEP : FOLDING STEP
-    #     # Defining increments to ensure all sampling angle are found
-    #     if len(FR_INPUTS['SAMPLING_ROTATIONS'])!=0:
-    #         max_increment = np.gcd.reduce(np.asarray(FR_INPUTS['SAMPLING_ROTATIONS']))/(FR_INPUTS['FOLDING_ANGLE_HINGE']*Multiplier)
-    #     else: max_increment = 0.1
-    #     refiner = 0.01 if all([int(FILE_ID)==0,int(ITERATION_ID)==0]) else 0.1 # reducing stepsize in dynamic analysis
-    #     # Defining Folding Step
-    #     if FR_INPUTS['SOLVER']=='NEWTON':
-    #         lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
-    #         lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #         lines.append("%f, 1, 1E-9, %f"%(max_increment,max_increment))
-    #         lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #     elif FR_INPUTS['SOLVER']=='LINEAR':
-    #         lines.append("*STEP, NAME=FOLDING, NLGEOM=NO, INC=1000")
-    #         lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
-    #         lines.append("%f, 1, 1E-9, %f"%(max_increment,max_increment))
-    #         lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #     elif FR_INPUTS['SOLVER']=='RIKS':
-    #         lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
-    #         lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
-    #         lines.append("%f, , 1E-9, %f, , ANODE_2, 4, %f" % (max_increment, max_increment, FR_INPUTS['FOLDING_ANGLE_X']))
-    #         # LOADING : FOLDING
-    #         lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
-    #     elif FR_INPUTS['SOLVER']=='DYNAMIC':
-    #         lines.append("*AMPLITUDE, NAME=AMP-2, DEFINITION=SMOOTH STEP")
-    #         lines.append("0, 0, 1, 1")
-    #         lines.append("*STEP, NAME=FOLDING, NLGEOM=YES, INC=1000")
-    #         lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
-    #         lines.append(" %f, 1, 1E-9, %f"%(max_increment*refiner,max_increment*refiner))
-    #         lines.append("*BOUNDARY, AMPLITUDE=AMP-2") # DYNAMIC, IMPLICIT
-    #     else:
-    #         raise("Error: Unsupported solver type '%s'." % FR_INPUTS['SOLVER'])
-    #     # LOADING VALUE
-    #     lines.append("ANODE_2, 4, 4, %f" %
-    #         (FR_INPUTS['FOLDING_ANGLE_X']/2.0 if FR_INPUTS['MODEL_SCALE'] == "HALF" else FR_INPUTS['FOLDING_ANGLE_X'])
-    #     )
-    #     # OUTPUT REQUESTS
-    #     if not Output_Requested:
-    #         lines.extend(Output_Requests)
-    #         Output_Requested = True
-    #     lines.append("*END STEP")
-
-    #     # writing
-    #     with open(filename+".inp", "w", encoding="utf-8") as f:
-    #         f.write("\n".join(lines) + "\n")
+        # writing
+        with open(filename+".inp", "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
 
 # %%
 class Tailored:
@@ -1925,37 +1813,21 @@ class Tailored:
                 self.mesh2D[increment_key].create_grouped_lines_nodes(group_name, group_lines, tolerance=self.tolerance)
 
             if bool_plot:
-                # Plot
-                self.mesh2D[increment_key].plot_groups_2D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_edges_{increment_key}"),
-                    group_keys=[],
-                    label=False
-                )
-
-                # Nodes plot
-                self.mesh2D[increment_key].plot_nodes_2D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_nodes_{increment_key}"),
-                    nset_keys=[],
-                    label=False
-                )
-
-                # Beams plot
-                self.mesh2D[increment_key].plot_beams_2D(  
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_beams_{increment_key}"),
-                    beam_set_keys=[],
-                    label=False
+                self.mesh2D[increment_key].plot_2D(
+                    {"group_sets": []},
+                    False,
+                    os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_{increment_key}.svg")
                 )
 
             # Triangulate
             self.mesh2D[increment_key].triangulate_2D(np.arange(self.mesh2D[increment_key].nodes.shape[0]))
 
             if bool_plot:
-                # Triangles plot
-                self.mesh2D[increment_key].plot_triangles_2D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_triangles_{increment_key}"),
-                    triangle_set_keys=[],
-                    label=False
-                )  
+                self.mesh2D[increment_key].plot_2D(
+                    {"group_sets": [], "triangle_sets": []},
+                    False,
+                    os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_2D_{increment_key}.svg")
+                ) 
 
     def mapping_2D_to_3D(self, bool_plot=False):
 
@@ -1968,7 +1840,7 @@ class Tailored:
 
         # Map 2D nodes to 3D
         self.mesh3D = {}
-        for increment_key in self.lattice_lines.keys():
+        for increment_key in self.mesh2D.keys():
             self.mesh3D[increment_key] = Mesh(3)
 
             # Map nodes
@@ -2006,24 +1878,40 @@ class Tailored:
                 self.mesh3D[increment_key].beam_sets[group_key] = np.array(beam_indices, dtype=int)
 
             if bool_plot:
-                self.mesh3D[increment_key].plot_nodes_3D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_3D_nodes_{increment_key}"),
-                    nset_keys=[],
-                    label=False
-                )
-                self.mesh3D[increment_key].plot_beams_3D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_3D_beams_{increment_key}"),
-                    beam_set_keys=[],
-                    label=False
-                )
-                self.mesh3D[increment_key].plot_triangles_3D(
-                    filename=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_3D_triangles_{increment_key}"),
-                    triangle_set_keys=[],
-                    label=False
+                self.mesh3D[increment_key].plot_3D(
+                    {"group_sets": [], "triangle_sets": []},
+                    label=False,
+                    save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_tailored_3D_{increment_key}.svg"),
                 )
 
+    def validate_midplane_mesh(self):
 
+        for increment_key in self.mesh3D.keys():
+            # check mesh
+            degenerates = self.mesh3D[increment_key].check_mesh_integrity()
+            if degenerates['unused_nodes'].size > 0:
+                print("Unused nodes:")
+                print(self.mesh3D[increment_key].nodes[degenerates['unused_nodes']])
+            if degenerates['degenerate_beams'].size > 0:
+                self.mesh3D[increment_key].remove_beams(degenerates['degenerate_beams'])
+            if degenerates['degenerate_triangles'].size > 0:
+                print(self.mesh3D[increment_key].triangles[degenerates['degenerate_triangles']])
+            if degenerates['missing_beam_edges_in_triangles'].size > 0:
+                print(f"WARNING: {degenerates['missing_beam_edges_in_triangles'].size} beam edges missing in triangles:")
+            degenerates = self.mesh3D[increment_key].check_mesh_integrity()
+            if degenerates['unused_nodes'].size > 0 and degenerates['degenerate_beams'].size > 0 and degenerates['degenerate_triangles'].size > 0 and degenerates['missing_beam_edges_in_triangles'].size > 0:
+                raise ValueError("Mesh integrity check failed, degenerates found.")
 
+            # check repeated sets
+            beam_sets = ["Trailing_Edge", "Ribs","Chevrons","Stringers"]
+            for i, key_i in enumerate(beam_sets):
+                for j, key_j in enumerate(beam_sets[i+1:]):
+                    repeat_index = np.isin(self.mesh3D[increment_key].beam_sets[key_j], self.mesh3D[increment_key].beam_sets[key_i])
+                    if np.any(repeat_index):
+                        print(f"WARNING: Beams of '{key_i}' repeated in '{key_j}' are removed from '{key_j}'.")
+                        self.mesh3D[increment_key].beam_sets[key_j] = self.mesh3D[increment_key].beam_sets[key_j][~repeat_index]
+
+            
 
 
 # %%
@@ -2040,7 +1928,8 @@ if __name__ == "__main__":
     #%%
     # Tailored Geometry
     tailored = Tailored(directory, case_number, lattice_data=lattice_data)
-    tailored.create_fairing_2D(bool_plot=True)
-    tailored.mapping_2D_to_3D(bool_plot=True)
+    tailored.create_fairing_2D(bool_plot=False)
+    tailored.mapping_2D_to_3D(bool_plot=False)
+    tailored.validate_midplane_mesh()
 
 # %%
