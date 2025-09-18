@@ -1,5 +1,6 @@
-from Utils import logger, run_subprocess, save_object, Directory
+import Utils
 from DEFAUTLS import RVE_DEFAULTS
+
 import os
 import shutil
 import traceback
@@ -11,7 +12,7 @@ class RVE:
     def __init__(self, variables=None, directory=None, case_number: int = 0):
         # directory setup
         if directory is None:
-            directory = Directory()
+            directory = Utils.Directory()
 
         # loading default variables
         self.var = RVE_DEFAULTS.copy()
@@ -19,7 +20,7 @@ class RVE:
             self.var.update(variables)
 
         # saving independent variables
-        save_object(
+        Utils.ReadWriteOps.save_object(
             self.var,
             os.path.join(directory.case_folder, "input", f"{case_number}_UC"),
             method="json",
@@ -624,7 +625,7 @@ class RVE:
 
         # save derived variables
         keys_to_save = ["qlx", "qly", "qlz", "core_area_ratio", "lx", "ly", "lz"]
-        save_object(
+        Utils.ReadWriteOps.save_object(
             {key: self.derived_var[key] for key in keys_to_save},
             os.path.join(
                 self.directory.case_folder, "input", f"{self.case_number}_UC_derived"
@@ -1648,7 +1649,7 @@ class RVE:
                 f"{abaqus_path} analysis double=both job={self.case_number}_RVE input={self.job_file} cpus="
                 f"{num_core} mp_mode=thread interactive"
             )
-            run_subprocess(command, self.run_folder, self.log_file)
+            Utils.run_subprocess(command, self.run_folder, self.log_file)
         except:
             traceback.print_exc()
             with open(self.log_file, "a") as f:
@@ -1685,9 +1686,9 @@ class RVE:
         # Extract results using a Python script
         script_file = os.path.abspath("abaqus_ABD_data.py")
         command = f"{abaqus_path} python {script_file} -- {self.directory.case_folder} {self.case_number}"
-        run_subprocess(command, self.run_folder, self.log_file)
+        Utils.run_subprocess(command, self.run_folder, self.log_file)
 
-    @logger
+    @Utils.logger
     def analysis(self):
         print(f"\tUPDATE: starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
         # Initialise geometry

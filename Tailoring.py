@@ -1,25 +1,17 @@
 # %%
 # Tailoring.py
-import sys
-import os
-import shutil
-import traceback
 
-import gmsh
-from matplotlib.backend_bases import key_press_handler
+import Utils
+from Fairing import FairingData
+
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import Delaunay
 from scipy import interpolate
-from mpl_toolkits.mplot3d import Axes3D
-from scipy.stats import triang
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-import Utils
-from Fairing import FairingData
 
 # %%
 class Lattice:
@@ -37,21 +29,21 @@ class Lattice:
         self.load_element_data()
 
     def load_field_data(self):
-        fairing_data: FairingData = Utils.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle")
+        fairing_data: FairingData = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle", 'latin1')
 
         self.shell_equivalent_SE = fairing_data.shell_equivalent_SE
         self.shell_equivalent_SK = fairing_data.shell_equivalent_SK
         self.rotation_angles = fairing_data.hinge_node["UR"][:, 0]
 
     def load_cell_data(self):
-        RVE_derived = Utils.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC_derived"), "json")
-        RVE_input = Utils.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC"), "json")
+        RVE_derived = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC_derived"), "json")
+        RVE_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC"), "json")
 
         self.cell_dimensions = [RVE_derived["lx"], RVE_derived["ly"], RVE_derived["lz"]]
         self.chevron_angle = RVE_input["chevron_angle"]
 
     def load_element_data(self):
-        mesh_data = Utils.load_object(
+        mesh_data = Utils.ReadWriteOps.load_object(
             os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_mesh_data"), 
             "pickle"
         )
@@ -599,13 +591,13 @@ class Lattice:
             intersection_points.sort(key=lambda x: x[1])
             
             # If we have too many intersections, the line might be too close to the boundary and cause numerical issues, so we skip it
-            intersection_threshold = 20
+            intersection_threshold = 10
             if len(intersection_points) >= intersection_threshold:
                 print(f"WARNING: Line {i} is removed due to close proximity to the border with {len(intersection_points)} intersections")
                 continue
                 
             # Process line segments between intersections
-            if len(intersection_points) >= 2:
+            if len(intersection_points) >= 2 and len(intersection_points) < intersection_threshold:
                 # Extract just the points from the sorted list
                 points = [p[0] for p in intersection_points]
                 
@@ -763,10 +755,14 @@ class Lattice:
             Tan60 = np.tan(self.chevron_angle) # unit cell chevron angle
             for line_i, line in enumerate(lines_2):
                 chevron_line = []
+                # Check if line has enough points   
+                if line.shape[0]<2: continue
+                # Adding chevron points
                 for seg_i in range(line.shape[0]-1):
-                    if seg_i==0: chevron_line.append(line[seg_i]) # additing initial point
+                    if seg_i==0: 
+                        chevron_line.append(line[seg_i]) # additing initial point
                     v1 = np.diff(line[seg_i:seg_i+2], axis=0).ravel()
-                    mag_v1 = np.linalg.norm(v1) + np.finfo(float).eps
+                    mag_v1 = np.linalg.norm(v1) #+ np.finfo(float).eps
                     norm_v1 = v1/mag_v1 # segment direction
                     norm_v2 = np.array([-norm_v1[1], norm_v1[0]]) # pendicular direction
                     mag_v2 = Tan60 * (mag_v1/2) 
@@ -787,13 +783,15 @@ class Lattice:
                     np.ones(trailing_edge_y.shape)*trailing_edge[i][0,0],
                     trailing_edge_y
                 ))
+    
 
             # data collection
             self.lattice_lines[key] = {
                 "Chevrons": spanwise,
                 "Stringers": chordwise,
                 "Ribs": ribs,
-                "Trailing_Edge": trailing_edge,
+                "TE_top": trailing_edge[0][np.newaxis, ...],
+                "TE_bottom": trailing_edge[1][np.newaxis, ...],
             }
 
             if bool_plot:
@@ -808,7 +806,7 @@ class Lattice:
                 )
 
         # Save
-        Utils.save_object(
+        Utils.ReadWriteOps.save_object(
             self.lattice_lines,
             os.path.join(self.directory.case_folder, "data", f"{self.case_number}_lattice_lines"),
             method="pickle"
@@ -1796,7 +1794,7 @@ class Tailored:
 
         # Load lattice data
         if self.lattice_data is None:
-            self.lattice_lines = Utils.load_object(
+            self.lattice_lines = Utils.ReadWriteOps.load_object(
                 os.path.join(self.directory.case_folder, "data", f"{self.case_number}_lattice_lines"),
                 method="pickle"
             )
@@ -1903,7 +1901,7 @@ class Tailored:
                 raise ValueError("Mesh integrity check failed, degenerates found.")
 
             # check repeated sets
-            beam_sets = ["Trailing_Edge", "Ribs","Chevrons","Stringers"]
+            beam_sets = ["TE_top", "TE_bottom", "Ribs","Chevrons","Stringers"]
             for i, key_i in enumerate(beam_sets):
                 for j, key_j in enumerate(beam_sets[i+1:]):
                     repeat_index = np.isin(self.mesh3D[increment_key].beam_sets[key_j], self.mesh3D[increment_key].beam_sets[key_i])
@@ -1931,5 +1929,3 @@ if __name__ == "__main__":
     tailored.create_fairing_2D(bool_plot=False)
     tailored.mapping_2D_to_3D(bool_plot=False)
     tailored.validate_midplane_mesh()
-
-# %%
