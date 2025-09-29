@@ -580,7 +580,7 @@ class RVE:
             [[7, 7], [10, 10]],
         ]
 
-    def eval_derived_variables(self):
+    def eval_derived_variables(self, bool_plot = True):
         # Compute derived geometric variables common for all cores and store in self.derived
         self.derived_var = {}
         self.derived_var["qlx"] = self.var["chevron_wall_length"] * np.cos(
@@ -622,6 +622,9 @@ class RVE:
                 self.ppr_core_geometry()
             case _:
                 raise ValueError(f"Unknown core type: {self.var['core_type']}")
+            
+        if bool_plot:
+            Utils.Plots.core_geometry(self.derived_var, os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_UC_core_geometry.png"))
 
         # save derived variables
         keys_to_save = ["qlx", "qly", "qlz", "core_area_ratio", "lx", "ly", "lz"]

@@ -1,4 +1,3 @@
-import numpy as np
 import Utils
 
 # Default configuration
@@ -30,6 +29,6 @@ FAIRING_DEFAULTS = {
     "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
     "model_type": "fairing", # either ["fairing", "slice"]
     "element_size": 0.020,
-    "model_fidelity": "equivalent", # either of ["S4R", "B31", "C3D8R"]
+    "model_fidelity": "equivalent", # either of ["equivalent", "explicit", "fullscale"]
     "solver": "newton" # either of ['linear', "newton", "riks", "dynamic"]
 }

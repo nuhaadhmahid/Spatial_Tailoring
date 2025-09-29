@@ -7,7 +7,6 @@ import traceback
 import gmsh
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import Utils
 from RVE import RVE
 from DEFAUTLS import FAIRING_DEFAULTS
@@ -749,7 +748,7 @@ class FairingAnalysis(FairingGeometry):
             # Run the Abaqus analysis
             command = (
                 f"{abaqus_path} analysis double=both job={self.case_number}_FR input={self.job_file} cpus="
-                f"{num_core} mp_mode=thread interactive"
+                f"{num_core} mp_mode=thread license_model=LEGACY interactive" 
             )
             Utils.run_subprocess(command, self.run_folder, self.log_file)
             # os.system("cd " + self.run_folder + "&&" + "echo y | " + command)
@@ -934,7 +933,7 @@ class FairingAnalysis(FairingGeometry):
 
     def post_process_results(self):
         # load fairing data
-        fairing_data =Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle", 'latin1')
+        fairing_data =Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle")
 
         # Check hinge node DOF
         tolerance = 1e-6
@@ -983,12 +982,16 @@ class FairingAnalysis(FairingGeometry):
         self.post_process_results()
 
 
-
 if __name__ == "__main__":
     directory = Utils.Directory(case_name="test_case_6")
 
     # Fairing definition
     fairing = FairingAnalysis(
+        variables={
+            "element_size": 0.020,
+            "model_fidelity": "equivalent",  # either of ["S4R", "B31", "C3D8R"]
+        },
+        
         directory=directory,
         case_number=0,
     )

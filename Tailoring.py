@@ -1,4 +1,4 @@
-# %%
+
 # Tailoring.py
 
 import Utils
@@ -13,7 +13,7 @@ from scipy.spatial import Delaunay
 from scipy import interpolate
 
 
-# %%
+
 class Lattice:
     def __init__(self, directory=Utils.Directory(), case_number:int= 0):
         self.directory = directory
@@ -29,7 +29,7 @@ class Lattice:
         self.load_element_data()
 
     def load_field_data(self):
-        fairing_data: FairingData = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle", 'latin1')
+        fairing_data: FairingData = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle")
 
         self.shell_equivalent_SE = fairing_data.shell_equivalent_SE
         self.shell_equivalent_SK = fairing_data.shell_equivalent_SK
@@ -1774,7 +1774,7 @@ class Mesh:
         with open(filename+".inp", "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-# %%
+
 class Tailored:
 
     def __init__(
@@ -1912,7 +1912,7 @@ class Tailored:
             
 
 
-# %%
+
 if __name__ == "__main__":
     # Example
     directory = Utils.Directory(case_name="test_case_4")

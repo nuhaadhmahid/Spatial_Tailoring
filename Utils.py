@@ -99,18 +99,18 @@ class ReadWriteOps:
             print("ERROR: Wrong file saving method")
 
     @staticmethod
-    def load_object(path, method, encoding=None):
+    def load_object(path, method):
         """
         Loads an object from a file using the specified method.
         For reading files pickled in python 2 to python 3 set encoding to 'latin1'.
         """
         if method == "pickle":
             with open(path + ".pickle", "rb") as f:
-                if encoding=='latin1':
+                try:
+                    return pickle.load(f)
+                except UnicodeDecodeError:
                     # for loading python 2 pickles in python 3
                     return pickle.load(f, encoding='latin1')
-                else:
-                    return pickle.load(f)
 
         elif method == "json":
             with open(path + ".json", "r", encoding="utf-8") as f:
@@ -934,6 +934,40 @@ class Plots:
         # Legend
         handles, labels = ax[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.95), ncol=len(labels), frameon=False)
+
+        fig.tight_layout()
+
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def core_geometry(coords_connectivity, save_path=None, show=False):
+                # Plot coordinates and line connectivity
+        fig, ax = plt.subplots()
+        coords = coords_connectivity["coordinates"]
+        lines = coords_connectivity["line_connectivity"]
+
+        # Plot nodes with labels
+        for key, value in coords.items():
+            ax.plot(value[0], value[1], 'o', color='blue')
+            ax.text(value[0], value[1], str(key), fontsize=9, ha='right', va='bottom')
+
+        # Plot lines
+        for line_set in lines:
+            for a, b in line_set:
+                p1 = coords[str(a)]
+                p2 = coords[str(b)]
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 'k-')
+
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.axis('equal')
 
         fig.tight_layout()
 
