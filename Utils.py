@@ -46,7 +46,7 @@ def indexed_function_caller(func, num, *args):
 
 def indices(A, B):
     """
-    For 1D arrays A and B, returns the indices of B in A in the order the values exist in B
+    For 1D arrays A and B, returns the indices of B values in A in the order the values exist in B
 
     :param A: 1D numpy array
     :param B: 1D numpy array
@@ -55,6 +55,13 @@ def indices(A, B):
     sort_idx = np.argsort(A)
     indices_B_in_A = sort_idx[np.searchsorted(A, B, sorter=sort_idx)]
     return np.array(indices_B_in_A)
+
+def unique_1D(A):
+    """
+    Returns the unique values in array A while preserving the original order.
+    """
+    _, idx = np.unique(A, return_index=True)
+    return A[np.sort(idx)]
 
 def run_subprocess(command, run_folder, log_file):
     """Runs a shell command and captures its output."""
