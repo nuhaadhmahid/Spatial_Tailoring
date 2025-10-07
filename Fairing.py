@@ -195,8 +195,15 @@ class FairingGeometry:
                     refence_aerofoil_coords, panel_thickness
                 )
 
-                # Aerofoil plotting
+                # Saving aerofoil coordinates
                 self.aerofoil_coords["reference"] = refence_aerofoil_coords
+                Utils.ReadWriteOps.save_object(
+                    self.aerofoil_coords,
+                    os.path.join(self.directory.case_folder, "data", f"{self.case_number}_aerofoil_coords"),
+                    "pickle"
+                )
+
+                # Aerofoil plotting
                 if bool_plot:
                     Utils.Plots.aerofoils(
                         self.aerofoil_coords,
@@ -983,7 +990,7 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_6")
+    directory = Utils.Directory(case_name="test_case_7")
 
     # Fairing definition
     fairing = FairingAnalysis(
@@ -991,7 +998,6 @@ if __name__ == "__main__":
             "element_size": 0.020,
             "model_fidelity": "equivalent",  # either of ["S4R", "B31", "C3D8R"]
         },
-        
         directory=directory,
         case_number=0,
     )
