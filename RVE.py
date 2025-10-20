@@ -1693,7 +1693,8 @@ class RVE:
 
     @Utils.logger
     def analysis(self):
-        print(f"\tUPDATE: starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
+        print(f"Starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
+
         # Initialise geometry
         self.eval_derived_variables()
         # Generate mesh

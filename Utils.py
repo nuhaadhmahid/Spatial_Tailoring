@@ -3,6 +3,7 @@ import time
 import traceback
 import pickle
 import json
+from mpl_toolkits import axes_grid1
 import numpy as np
 import subprocess
 import matplotlib.pyplot as plt
@@ -16,13 +17,13 @@ def logger(func):
         try:
             result = func(*args, **kwargs)
             print(
-                f"\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} completed in "
+                f"\t\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} completed in "
                 f"{time.time() - start:.2f}s"
             )
             return result
         except:
             print(
-                f"\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} failed to complete"
+                f"\t\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} failed to complete"
             )
             print(traceback.format_exc())
             return None
@@ -167,11 +168,11 @@ class ReadWriteOps:
             """
             Return number of element items (i.e., label + number of nodes) for solid, shell and beam element using GMSH element types.
             """
-            if type_label.startswith("C3D"):
+            if type_label.startswith("C3D"): # solid element
                 return int(type_label.strip("C3D")) + 1
-            elif type_label.startswith("CPS"):
+            elif type_label.startswith("CPS"): # shell element
                 return int(type_label.strip("CPS")) + 1
-            elif type_label.startswith("T3D"):
+            elif type_label.startswith("T3D"): # beam element
                 return int(type_label.strip("T3D")) + 1
             else:
                 raise ValueError(f"Unknown element type: {type_label}")
@@ -189,13 +190,13 @@ class ReadWriteOps:
                 num_items_per_element = num_element_data(current_type)
                 if current_type not in mesh_data["elements"]:
                     mesh_data["elements"][current_type] = []
-            elif line.startswith("*ELSET,ELSET="):
+            elif line.startswith("*ELSET"):
                 section = "elsets"
-                current_set = line.strip().split("=")[1]
+                current_set = line.split(",")[1].split("=")[1].strip()
                 mesh_data["elsets"][current_set] = []
-            elif line.startswith("*NSET,NSET="):
+            elif line.startswith("*NSET"):
                 section = "nsets"
-                current_set = line.strip().split("=")[1]
+                current_set = line.split(",")[1].split("=")[1].strip()
                 mesh_data["nsets"][current_set] = []
             elif line.startswith("*"):
                 section = None
@@ -219,8 +220,8 @@ class ReadWriteOps:
 
         # Convert element type
         for key in list(mesh_data["elements"].keys()):
-            if "CPS4" in key:
-                mesh_data["elements"]["S4R"] = mesh_data["elements"].pop("CPS4")
+            if key.startswith("CPS"):  # shell elements
+                mesh_data["elements"]["S" + key[3:] + "R"] = mesh_data["elements"].pop(key)
             else:
                 raise ValueError(f"ERROR: Unrecognised element type {key}")
 
@@ -246,10 +247,10 @@ class ReadWriteOps:
             original_element_numbers = np.concatenate((original_element_numbers, elements[:, 0].copy()), axis=0)
         # Updating the element numbering to start from 1
         for key in mesh_data["elements"].keys():
-            mesh_data["elements"][key][:, 0] = np.argwhere(original_element_numbers == mesh_data["elements"][key][:, 0]).flatten() + 1
+            mesh_data["elements"][key][:, 0] = indices(original_element_numbers, mesh_data["elements"][key][:, 0]) + 1
+            # mesh_data["elements"][key][:, 0] = np.argwhere(original_element_numbers == mesh_data["elements"][key][:, 0]).flatten() + 1
         for key in mesh_data["elsets"]:
-            elset_indices = np.argwhere(original_element_numbers == mesh_data["elsets"][key]).flatten()
-            mesh_data["elsets"][key] = elset_indices + 1
+            mesh_data["elsets"][key] = indices(original_element_numbers, mesh_data["elsets"][key]) + 1
 
         return mesh_data
 
@@ -346,12 +347,50 @@ class GeoOps:
                 f"Input line must be a 2D numpy array with at least 2 points. Received {line.shape}"
             )
         midpoints = line[:-1] + np.diff(line, axis=0) / 2.0
-        new_lines = np.empty(
+        new_line = np.empty(
             (line.shape[0] + midpoints.shape[0], line.shape[1]), dtype=line.dtype
         )
-        new_lines[0::2] = line
-        new_lines[1::2] = midpoints
-        return new_lines
+        new_line[0::2] = line
+        new_line[1::2] = midpoints
+        return new_line
+    
+    @staticmethod
+    def increment_line(line, increment_size):
+        """
+        Increments each point in the line by a specified size.
+        Parameters
+            lines : np.ndarray : An array of shape (N, M) representing N lines, each with M coordinates.
+        Returns     
+            np.ndarray : An array of shape (2*N - 1, M) containing the original lines and their midpoints interleaved.
+        """
+        if not isinstance(line, np.ndarray) or line.ndim != 2 or line.shape[0] < 2:
+            raise ValueError(
+                f"Input line must be a 2D numpy array with at least 2 points. Received {line.shape}"
+            )
+        if not isinstance(increment_size, (int, float)) or increment_size <= 0:
+            raise ValueError(
+                f"Increment size must be a positive number. Received {increment_size}"
+            )
+
+        # Compute distances and increments
+        dists = np.sum(np.diff(line, axis=0)**2, axis=1)**0.5
+        increments = np.floor(dists / increment_size).astype(int)
+
+        # Initialise new line
+        num_points = sum(increments) + 1
+        new_line = np.zeros((num_points, line.shape[1]))
+
+        # New line
+        points = [line[0]]
+        for idx, inc in enumerate(increments):
+            if inc > 0:
+                segment = np.linspace(line[idx], line[idx + 1], inc + 1)[1:]
+                points.extend(segment)
+            else:
+                points.append(line[idx + 1])
+        new_line = np.array(points)
+
+        return new_line
 
     @staticmethod
     def generate_naca_4digit(naca_code, num_points=100):

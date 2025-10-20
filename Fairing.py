@@ -9,6 +9,7 @@ import numpy as np
 
 import Utils
 from RVE import RVE
+from Tailored import Trace, Lattice
 from DEFAUTLS import FAIRING_DEFAULTS
 
 class FairingData:
@@ -29,6 +30,7 @@ class FairingGeometry:
         # set directory and case number
         self.directory = directory
         self.case_number = case_number
+
 
         # loading default variables
         self.var = FAIRING_DEFAULTS.copy()
@@ -77,7 +79,7 @@ class FairingGeometry:
         } | {key: uc_derived_inputs[key] for key in ["lx", "ly", "lz"]}
 
         # extracting stiffness
-        if not self.var["bool_isotropic"]:
+        if self.var["model_fidelity"]=="equivalent" and not self.var["model_fidelity_settings"]["equivalent"]["bool_isotropic"]:
             self.RVE_variables["stiffness"] =Utils.ReadWriteOps.load_object(
                 os.path.join(
                     directory.case_folder, "data", f"{RVE_identifier}_stiffness"
@@ -214,7 +216,7 @@ class FairingGeometry:
                         ),
                     )
 
-            def create_shell_surface():
+            def create_shell_geometry():
                 """
                 Create the shell surface for the fairing.
                 """
@@ -362,7 +364,7 @@ class FairingGeometry:
                 # Pivoting rib
                 CAD.addPhysicalGroup(1, [rib_line_tags[-1]], name="RIB_P")
                 # All ribs
-                CAD.addPhysicalGroup(1, rib_line_tags, name="RIB_ALL")
+                CAD.addPhysicalGroup(1, rib_line_tags, name="RIBS")
                 # Trailing Edge
                 if is_closed_profile:
                     CAD.addPhysicalGroup(1, [TE_line_tags], name="TE")
@@ -457,11 +459,11 @@ class FairingGeometry:
                 )
 
                 # define section
-                if self.var["bool_isotropic"]:
+                if self.var["model_fidelity_settings"]["equivalent"]["bool_isotropic"]:
                     lines.extend(
                         [
                             "*SHELL SECTION, ELSET=SHELL_EQUIVALENT, MATERIAL=MAT-CORE, ORIENTATION=MAT-AXIS",
-                            f"5, {self.RVE_variables['lz']}",
+                            f"{self.RVE_variables['lz']}, 5",
                         ]
                     )
                     lines.extend(
@@ -523,10 +525,10 @@ class FairingGeometry:
                     if all(set in self.mesh_data["nsets"] for set in ["TE_TOP", "TE_BOTTOM"]):
                         # node indices
                         top_nodes_idx = np.setdiff1d(
-                            self.mesh_data["nsets"]["TE_TOP"], self.mesh_data["nsets"]["RIB_ALL"], assume_unique=True
+                            self.mesh_data["nsets"]["TE_TOP"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
                         ) - 1 # node number starts from 1 but the index starts from 0
                         bottom_nodes_idx = np.setdiff1d(
-                            self.mesh_data["nsets"]["TE_BOTTOM"], self.mesh_data["nsets"]["RIB_ALL"], assume_unique=True
+                            self.mesh_data["nsets"]["TE_BOTTOM"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
                         ) - 1 # node number starts from 1 but the index starts from 0
 
                         # arranged node indices along Y-axis
@@ -563,10 +565,10 @@ class FairingGeometry:
             # Get cross-section shape
             get_aerofoil_cords(500)
 
-            # Create shell surface
-            create_shell_surface()
+            # Create shell geometry
+            create_shell_geometry()
 
-            # Add refernce nodes
+            # Add reference nodes
             create_reference_nodes()
 
             # Create mesh
@@ -576,7 +578,253 @@ class FairingGeometry:
             create_abaqus_geometry()
 
         def create_explicit_model():
-            pass
+
+            def create_shell_geometry():
+
+                ref_case = self.var["model_fidelity_settings"]["explicit"]["reference_case"]
+                field_instance = self.var["model_fidelity_settings"]["explicit"]["reference_field"]
+
+                geometry = Utils.ReadWriteOps.read_mesh_data(os.path.join(self.directory.case_folder, "mesh", f"{ref_case}_{field_instance}_tailored_mesh.inp"))
+
+                # Pre-processing
+                # Remove rib elements
+                rib_elements = geometry["elsets"]["RIBS"]
+                all_elements = np.r_[*geometry["elements"].values()]
+                mask = np.isin(all_elements[:,0], rib_elements, invert=True)
+                for key in geometry["elements"].keys():
+                    geometry["elements"][key] = all_elements[mask & (all_elements[:,0][:,None]==int(key[0]))[:,0]]
+
+                # create points
+                points = np.empty((geometry["nodes"].shape[0],), dtype=int)
+                for i, node in enumerate(geometry["nodes"]):
+                    points[i] = CAD.addPoint(node[1], node[2], node[3])
+
+                # Check if all points are created
+                assert np.all(points == geometry["nodes"][:, 0]), "ERROR: Some points were not created. They likely got merged. Increase the tolerance in Tailoring.py"
+
+                # create surface
+                if geometry["elements"].keys() != {"S3R"}:
+                    raise ValueError(f"ERROR: Unsupported element types. Recieved {geometry['elements'].keys()}, expected {{'S3R'}}")
+
+                surface = np.empty((geometry["elements"]["S3R"].shape[0],), dtype=int)
+                for i, line in enumerate(geometry["elements"]["S3R"]):
+                    _, element = line[0], line[1:]
+                    surface[i] = CAD.addPlaneSurface(
+                        [
+                            CAD.addCurveLoop(
+                                [
+                                    CAD.addLine(element[j], element[k])
+                                    for j, k in [(0, 1), (1, 2), (2, 0)]
+                                ]
+                            )
+                        ]
+                    )
+
+                # Check if all surfaces are created
+                assert np.all(surface == geometry["elements"]["S3R"][:, 0]), "ERROR: Some surfaces were not created."
+
+                # Synchronize
+                CAD.synchronize()
+
+                # Remove existing physical groups
+                CAD.removePhysicalGroups([])
+
+                # Create physical groups for element sets
+                for name, elset in geometry["elsets"].items():
+                    CAD.addPhysicalGroup(2, elset, name=name)
+
+                # Synchronize
+                CAD.synchronize()
+
+                # Create seperate physical group for each rib
+                assert self.var["num_floating_ribs"] == 0, "ERROR: Explicit model not implemented for floating ribs yet"
+                num_ribs = 2 + self.var["num_floating_ribs"]
+                rib_spacing = (self.var["fairing_span"]/(1+self.var["pre_strain"])) / (2 * (num_ribs - 1)) # spacing between ribs
+                ribs_elements = geometry["elsets"]["RIBS"] # element tags for all ribs
+                model_bounds = np.array( MODEL.get_bounding_box(-1,-1) ) # modeling bounds
+                tolerance = 1e-2
+                for i  in range(num_ribs):
+                    # Get elements at the rib location
+                    model_bounds[[1,4]] = rib_spacing * i
+                    model_bounds[:3] -= tolerance
+                    model_bounds[3:] += tolerance
+                    local_rib_elements = np.array(MODEL.getEntitiesInBoundingBox(*model_bounds, dim=2), dtype=int)[:,1]
+                    # Filter only rib elements
+                    local_rib_elements = np.intersect1d(local_rib_elements, ribs_elements)
+                    # Create physical group
+                    CAD.addPhysicalGroup(2, local_rib_elements, name=["RIB_0", "RIB_P"][i])
+
+                # Create physical groups for Materials
+                # CORE
+                CAD.addPhysicalGroup(
+                    2,
+                    np.r_[*(
+                        geometry["elsets"][elset]
+                        for elset in ['STRINGERS', 'CHEVRONS']
+                    )],
+                    name="CORE",
+                )
+                # facesheet
+                facesheet_elsets = np.intersect1d(np.array(["OUTER_SURFACE", "INNER_SURFACE"]), np.array(list(geometry["elsets"].keys())))
+                if facesheet_elsets.size != 0:
+                    CAD.addPhysicalGroup(
+                        2,
+                        np.r_[*(
+                            geometry["elsets"][elset]
+                            for elset in ["OUTER_SURFACE", "INNER_SURFACE"]
+                        )],
+                        name="FACESHEET",
+                    )
+
+                # Synchronize
+                CAD.synchronize()
+
+            def create_mesh() -> None:
+                """
+                Generate the mesh  and saves it in ABAQUS format.
+                """
+                # Mesh generation
+                gmsh.option.setNumber("Mesh.MeshSizeMax", self.var["element_size"])
+                MESH.generate(2)
+                MESH.optimize()
+
+                # Printing options
+                gmsh.option.setNumber("Mesh.SaveGroupsOfElements", -100)
+                gmsh.option.setNumber("Mesh.SaveGroupsOfNodes", -111)
+
+                # Saving geometry mesh file
+                gmsh.write(
+                    os.path.join(
+                        self.directory.case_folder,
+                        "mesh",
+                        f"{self.case_number}_15_fairing_mesh.inp",
+                    )
+                )
+
+            def create_abaqus_geometry(bool_plot=False) -> None:
+                """
+                Generate the ABAQUS geometry with section, material, orientation rigid-body properties.
+                """
+
+                # load mesh data
+                mesh = Utils.ReadWriteOps.read_mesh_data(
+                    os.path.join(
+                        self.directory.case_folder,
+                        "mesh",
+                        f"{self.case_number}_15_fairing_mesh.inp",
+                    )
+                )
+
+                # initialise a list
+                lines = []
+
+                # print nodes
+                lines.append("*NODE")
+                lines.extend(
+                    [
+                        line
+                        for node in mesh["nodes"]
+                        for line in Utils.ReadWriteOps.format_lines(node)
+                    ]
+                )
+
+                # print elements
+                for type, element in mesh["elements"].items():
+                    lines.append(f"*ELEMENT, TYPE={type}")
+                    lines.extend(
+                        [
+                            line
+                            for element in mesh["elements"][type]
+                            for line in Utils.ReadWriteOps.format_lines(element)
+                        ]
+                    )
+
+                # print sets
+                for set_name, set_items in mesh["elsets"].items():
+                    lines.append(f"*ELSET, ELSET={set_name}")
+                    lines.extend(Utils.ReadWriteOps.format_lines(set_items))
+                for set_name, set_items in mesh["nsets"].items():
+                    lines.append(f"*NSET, NSET={set_name}")
+                    lines.extend(Utils.ReadWriteOps.format_lines(set_items))
+
+
+                # print orientation
+                lines.extend(
+                    [
+                        "*ORIENTATION, NAME=MAT-AXIS, DEFINITION=COORDINATES, SYSTEM=CYLINDRICAL",
+                        f"{self.var['fairing_chord'] / 2}, {self.var['fairing_span'] / 4}, 0.0, {self.var['fairing_chord'] / 2}, {self.var['fairing_span'] / 3}, 0.0",
+                        "1, 90.000000",
+                    ]
+                )
+
+                # define section and material for each part
+                materials = np.intersect1d(np.array(["CORE", "FACESHEET"]), np.array(list(mesh["elsets"].keys())))
+                
+                # define facesheet sections
+                if "FACESHEET" in materials:
+                    facesheet_sections = np.intersect1d(np.array(["INNER_SURFACE", "OUTER_SURFACE"]), np.array(list(mesh["elsets"].keys())))
+                    offsets = {
+                        "INNER_SURFACE": 0.5,
+                        "OUTER_SURFACE": -0.5,
+                    }
+                    if facesheet_sections.size != 0:
+                        for set_name in facesheet_sections: 
+                            lines.extend(
+                                [
+                                    f"*SHELL SECTION, ELSET={set_name}, MATERIAL=MAT-FACESHEET, ORIENTATION=MAT-AXIS, OFFSET={offsets[set_name]}",
+                                    f"{self.RVE_variables['facesheet_thickness']}, 5",
+                                ]
+                            )
+
+                # define core sections
+                thickness = {
+                    "STRINGERS": self.RVE_variables['rib_thickness'],
+                    "CHEVRONS": self.RVE_variables['chevron_thickness'],
+                }
+                for set_name in ["STRINGERS", "CHEVRONS"]: 
+                    lines.extend(
+                        [
+                            f"*SHELL SECTION, ELSET={set_name}, MATERIAL=MAT-CORE, ORIENTATION=MAT-AXIS",
+                            f"{thickness[set_name]}, 5",
+                        ]
+                    )
+
+                # define materials
+                for set_name in materials:
+                    lines.extend(
+                        [
+                            f"*MATERIAL, NAME=MAT-{set_name}",
+                            "*ELASTIC",
+                            f"{self.RVE_variables[f'{set_name.lower()}_material'][0]}, {self.RVE_variables[f'{set_name.lower()}_material'][1]}",
+                            "*DENSITY",
+                            "1",
+
+                        ]
+                    )
+
+                # saving file
+                with open(
+                    os.path.join(
+                        self.directory.case_folder,
+                        "inp",
+                        f"{self.case_number}_15_fairing_geometry.inp",
+                    ),
+                    "w",
+                ) as f:
+                    f.write("\n".join(lines))
+
+
+            # Create shell geometry
+            create_shell_geometry()
+
+            # Add reference nodes
+            create_reference_nodes()
+
+            # Create mesh
+            create_mesh()
+
+            # Create geometry
+            create_abaqus_geometry()
 
         # Initialize GMSH
         gmsh.initialize()
@@ -972,9 +1220,14 @@ class FairingAnalysis(FairingGeometry):
             show=False
         )
 
+        if self.var["model_fidelity"] == "equivalent":
+            # Trace Lattice
+            trace_data = Trace(self.directory, self.case_number)
+            trace_data.analysis()
+
     @Utils.logger
     def analysis(self):
-        print(f"\tUPDATE: starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
+        print(f"Starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
 
         # Generate mesh
         self.generate_mesh()
@@ -989,16 +1242,28 @@ class FairingAnalysis(FairingGeometry):
         self.post_process_results()
 
 
+
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_7")
+    directory = Utils.Directory(case_name="test_case_8")
 
     # Fairing definition
     fairing = FairingAnalysis(
-        variables={
-            "element_size": 0.020,
-            "model_fidelity": "equivalent",  # either of ["S4R", "B31", "C3D8R"]
-        },
         directory=directory,
         case_number=0,
     )
     fairing.analysis()
+
+    # geometry = FairingAnalysis(
+    #     variables={
+    #         "element_size": 0.020,
+    #         "model_fidelity": "explicit", 
+    #     },
+    #     RVE_identifier=0,
+    #     directory=directory,
+    #     case_number=1,
+    # )
+    # geometry.generate_mesh(bool_show=False)
+    # geometry.run_abaqus()
+    # geometry.extract_fairing_data()
+    # geometry.post_process_results()
+

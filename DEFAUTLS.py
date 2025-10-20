@@ -14,7 +14,7 @@ RVE_DEFAULTS = {
     "facesheet_thickness": Utils.Units.mm2m(0.5),
     "core_material": (396e6, 0.48),
     "facesheet_material": (22.9e6, 0.48),
-    "element_type": "C3D8R",
+    "element_type": "C3D8R", 
     "element_size": 0.001
 }
 
@@ -26,9 +26,17 @@ FAIRING_DEFAULTS = {
     "num_floating_ribs": 0, # number of floating ribs in each rib bay
     "pre_strain": 0.1,
     "rotation_angle": Utils.Units.deg2rad(15.0),
-    "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
     "model_type": "fairing", # either ["fairing", "slice"]
     "element_size": 0.020,
     "model_fidelity": "equivalent", # either of ["equivalent", "explicit", "fullscale"]
+    "model_fidelity_settings":{
+        "equivalent":{
+            "bool_isotropic": True, # [True, False], if true core properites use, else equivalent panel properties
+        },
+        "explicit":{
+            "reference_case": 0, # int, case number of the reference case from which the explicit model is generated
+            "reference_field": 15, # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+        },
+    },
     "solver": "newton" # either of ['linear', "newton", "riks", "dynamic"]
 }

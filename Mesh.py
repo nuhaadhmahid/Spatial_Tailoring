@@ -1,4 +1,5 @@
 # Mesh.py
+import traceback
 import Utils
 from functools import reduce
 import numpy as np
@@ -288,6 +289,8 @@ class Mesh (Nodes, Elements):
     def nsets(self):
         return self.__nodes.sets
     def elsets(self):
+        """ 
+        For each instance of Elements in the Mesh, return its Sets as a list of dictionaries."""
         return [el.sets for el in self.__elements]
 
     def add_nodes(self, new_nodes: np.ndarray, nset_name: str|None = None, tolerance: float = 1e-4) -> np.ndarray:
@@ -313,6 +316,15 @@ class Mesh (Nodes, Elements):
             self.__nodes.add_or_merge_set(nset_name, Utils.unique_1D(incorporated_indices))
 
         return incorporated_indices
+
+    def add_nset(self, name: str, items: np.ndarray) -> None:
+        """
+        Adds a new set of nodes.
+        Parameters:
+            name (str): Name of the set.
+            items (np.ndarray): Array of node indices to include in the set.
+        """
+        self.__nodes.add_or_merge_set(name, items)
 
     def add_elements(self, el_list_idx: int, new_elements: np.ndarray, elset_name: str|None = None) -> np.ndarray:
         """
@@ -529,31 +541,36 @@ class Mesh (Nodes, Elements):
             elsets = self.__elements[el_list_idx].sets
             colours = plt.cm.rainbow(np.linspace(0,1,len(elsets)))
             for (name, elset), colour in zip(elsets.items(), colours):
-                for count, index in enumerate(elset):
-                    nodes_idx = self.__elements[el_list_idx]()[index]
-                    nodes = self.nodes[nodes_idx]
-                    if dim == 2:
+                
+                # get elements
+                elements = self.__elements[el_list_idx]()[elset]
+                
+                if dim == 2: # plot each element individually to avoid connecting lines
+                    for count, element in enumerate(elements): 
                         ax.plot(
-                            nodes[:, 0], nodes[:, 1], nodes[:, 2],
+                            *(self.nodes[element, j] for j in range(dim)),
                             color=colour,
                             marker='.', markersize=0.5,
                             linestyle='-', linewidth=0.5,
                             label=name if count == 0 else None,
                         )
-                    elif dim == 3:
-                        ax.plot_trisurf(
-                            nodes[:, 0], nodes[:, 1], nodes[:, 2],
-                            closed=True,
-                            facecolor=colour,
-                            alpha=0.2,
-                            edgecolor="k",
-                            linewidth=0.5,
-                            label=name if count == 0 else None,
-                        )
-                    if label:
-                        center = np.mean(nodes, axis=0)
+                elif dim == 3: # plot all triangles in one go
+                    ax.plot_trisurf( 
+                        *(self.nodes[:, j] for j in range(dim)),
+                        triangles=elements,
+                        facecolor=colour,
+                        alpha=0.2,
+                        edgecolor="k",
+                        linewidth=0.5,
+                        label=name,
+                    )
+
+                if label:
+                    for count, (index, element) in enumerate(zip(elset, elements)):
+                        center = np.mean(self.nodes[element], axis=0)
                         ax.text(center[0], center[1], center[2], f"e:{index}", color=colour,
                                 ha='center', va='top', fontsize=2)
+
 
         fig = plt.figure(figsize=(7.5,4))
         ax = fig.add_subplot(111, projection='3d')
