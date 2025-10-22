@@ -8,8 +8,8 @@ import gmsh
 import numpy as np
 
 import Utils
+import Tailoring
 from RVE import RVE
-from Tailored import Trace, Lattice
 from DEFAUTLS import FAIRING_DEFAULTS
 
 class FairingData:
@@ -31,21 +31,20 @@ class FairingGeometry:
         self.directory = directory
         self.case_number = case_number
 
-
         # loading default variables
         self.var = FAIRING_DEFAULTS.copy()
         if variables:
             self.var.update(variables)
 
         # add required RVE variables
-        if RVE_identifier is None:
-            panel = RVE(directory=directory)
-            panel.analysis()
-            RVE_identifier = panel.case_number
-            uc_inputs = panel.var
-            uc_derived_inputs = panel.derived_var
-        else:
-            try:
+        if self.var["model_fidelity"]=="equivalent":
+            if RVE_identifier is None:
+                panel = RVE(directory=directory)
+                panel.analysis()
+                RVE_identifier = panel.case_number
+                uc_inputs = panel.var
+                uc_derived_inputs = panel.derived_var
+            else:
                 uc_inputs =Utils.ReadWriteOps.load_object(
                     os.path.join(
                         directory.case_folder, "input", f"{RVE_identifier}_UC"
@@ -58,10 +57,22 @@ class FairingGeometry:
                     ),
                     "json",
                 )
-            except:
-                raise ValueError(
-                    f"ERROR: RVE_identifier not found. Recieved {RVE_identifier}. Run the panel homogenisation before specified the RVE_indentifier"
-                )
+        elif self.var["model_fidelity"]=="explicit":
+            reference_case = self.var["model_fidelity_settings"]["explicit"]["reference_case"]
+            uc_inputs =Utils.ReadWriteOps.load_object(
+                os.path.join(
+                    directory.case_folder, "input", f"{reference_case}_UC"
+                ),
+                "json",
+            )
+            uc_derived_inputs =Utils.ReadWriteOps.load_object(
+                os.path.join(
+                    directory.case_folder, "input", f"{reference_case}_UC_derived"
+                ),
+                "json",
+            )
+        else:
+            raise ValueError(f"ERROR: Unacceptable model_fidelity={self.var['model_fidelity']}")
 
         # extracting RVE variables
         self.RVE_variables = {
@@ -138,6 +149,20 @@ class FairingGeometry:
             raise ValueError(
                 f"ERROR: Unacceptable value for aerofoil_path={aerofoil_path}"
             )
+
+    def load_mesh_data(self):
+        """
+        Load the mesh data for the fairing.
+        """
+        # load mesh data
+        self.mesh_data = Utils.ReadWriteOps.read_mesh_data(
+            os.path.join(
+                self.directory.case_folder,
+                "mesh",
+                f"{self.case_number}_fairing_mesh.inp",
+            )
+        )
+
 
     def generate_mesh(self, bool_show=False):
         """
@@ -230,9 +255,14 @@ class FairingGeometry:
                 )
                 if rem > 0.0:
                     print(
-                        f"\t\tWARNING: rib arc length not an integer multiple of cell size. Num cells {num_arc_units}, Remainder {rem:.4f}"
+                        f"\tWARNING: rib arc length not an integer multiple of cell size. Num cells {num_arc_units}, Remainder {rem:.4f}"
                     )
-                num_cells_in_wing_cross_section = int(num_arc_units)
+                if self.var["element_size"] is None:
+                    num_cells_in_wing_cross_section = int(num_arc_units)
+                else:
+                    num_cells_in_wing_cross_section = int(
+                        wing_cross_section_arc_length / self.var["element_size"]
+                    )
 
                 # Spanwise discretisation
                 num_ribs = 2 + self.var["num_floating_ribs"]
@@ -240,9 +270,14 @@ class FairingGeometry:
                 num_bay_units, rem = divmod(rib_spacing, self.RVE_variables["lx"])
                 if rem > 0.0:
                     print(
-                        f"\t\tWARNING: bay spacing not an integer multiple of cell size. Num cells {num_bay_units}, Remainder {rem:.4f}"
+                        f"\tWARNING: bay spacing not an integer multiple of cell size. Num cells {num_bay_units}, Remainder {rem:.4f}"
                     )
-                num_cells_in_wing_rib_bay = int(num_bay_units)
+                if self.var["element_size"] is None:
+                    num_cells_in_wing_rib_bay = int(num_bay_units)
+                else:
+                    num_cells_in_wing_rib_bay = int(
+                        rib_spacing / self.var["element_size"]
+                    )
 
                 # Check if the airfoil is closed (last point equals first point)
                 is_closed_profile = np.allclose(
@@ -408,14 +443,7 @@ class FairingGeometry:
                 Generate the ABAQUS geometry with section, material, orientation rigid-body properties.
                 """
 
-                # load mesh data
-                self.mesh_data = Utils.ReadWriteOps.read_mesh_data(
-                    os.path.join(
-                        self.directory.case_folder,
-                        "mesh",
-                        f"{self.case_number}_fairing_mesh.inp",
-                    )
-                )
+                self.load_mesh_data()
 
                 # initialise a list
                 lines = []
@@ -579,20 +607,21 @@ class FairingGeometry:
 
         def create_explicit_model():
 
+            def create_tailored_geometry():
+                """
+                Generate tailored geometry for explicit fairing model.
+                """
+                # Get reference case and field
+                reference_case = self.var["model_fidelity_settings"]["explicit"]["reference_case"]
+                reference_field = self.var["model_fidelity_settings"]["explicit"]["reference_field"]
+
+                # Generate tailored geometry
+                tailored = Tailoring.Lattice(self.directory, self.case_number, reference_case, reference_field)
+                tailored.analysis(0.5e-2 * self.var["fairing_chord"])
+
             def create_shell_geometry():
 
-                ref_case = self.var["model_fidelity_settings"]["explicit"]["reference_case"]
-                field_instance = self.var["model_fidelity_settings"]["explicit"]["reference_field"]
-
-                geometry = Utils.ReadWriteOps.read_mesh_data(os.path.join(self.directory.case_folder, "mesh", f"{ref_case}_{field_instance}_tailored_mesh.inp"))
-
-                # Pre-processing
-                # Remove rib elements
-                rib_elements = geometry["elsets"]["RIBS"]
-                all_elements = np.r_[*geometry["elements"].values()]
-                mask = np.isin(all_elements[:,0], rib_elements, invert=True)
-                for key in geometry["elements"].keys():
-                    geometry["elements"][key] = all_elements[mask & (all_elements[:,0][:,None]==int(key[0]))[:,0]]
+                geometry = Utils.ReadWriteOps.read_mesh_data(os.path.join(self.directory.case_folder, "mesh", f"{self.case_number}_fairing_geometry.inp"))
 
                 # create points
                 points = np.empty((geometry["nodes"].shape[0],), dtype=int)
@@ -602,21 +631,26 @@ class FairingGeometry:
                 # Check if all points are created
                 assert np.all(points == geometry["nodes"][:, 0]), "ERROR: Some points were not created. They likely got merged. Increase the tolerance in Tailoring.py"
 
-                # create surface
+                # create surface # FIXME: Avoid edge replication
                 if geometry["elements"].keys() != {"S3R"}:
                     raise ValueError(f"ERROR: Unsupported element types. Recieved {geometry['elements'].keys()}, expected {{'S3R'}}")
 
+                # get unique edges
+                signed_indices, unique_edges = Utils.GeoOps.edge_pairs(geometry["elements"]["S3R"][:, 1:])
+
+                # create edges
+                surface_edges = np.empty((unique_edges.shape[0],), dtype=int)
+                for i, edge in enumerate(unique_edges):
+                    surface_edges[i] = CAD.addLine(edge[0], edge[1])
+
+                # create surfaces using signed reference to unique edges
                 surface = np.empty((geometry["elements"]["S3R"].shape[0],), dtype=int)
-                for i, line in enumerate(geometry["elements"]["S3R"]):
-                    _, element = line[0], line[1:]
+                for i, element_edges in enumerate(signed_indices):
+                    signs = element_edges[:,0]
+                    indices = element_edges[:,1]
                     surface[i] = CAD.addPlaneSurface(
                         [
-                            CAD.addCurveLoop(
-                                [
-                                    CAD.addLine(element[j], element[k])
-                                    for j, k in [(0, 1), (1, 2), (2, 0)]
-                                ]
-                            )
+                            CAD.addCurveLoop((signs*surface_edges[indices]))
                         ]
                     )
 
@@ -697,7 +731,7 @@ class FairingGeometry:
                     os.path.join(
                         self.directory.case_folder,
                         "mesh",
-                        f"{self.case_number}_15_fairing_mesh.inp",
+                        f"{self.case_number}_fairing_mesh.inp",
                     )
                 )
 
@@ -711,9 +745,23 @@ class FairingGeometry:
                     os.path.join(
                         self.directory.case_folder,
                         "mesh",
-                        f"{self.case_number}_15_fairing_mesh.inp",
+                        f"{self.case_number}_fairing_mesh.inp",
                     )
                 )
+
+                # Pre-processing
+                # Remove rib elements
+                for type in mesh["elements"].keys():
+                    mesh["elements"][type] = mesh["elements"][type][
+                        ~np.isin(mesh["elements"][type][:, 0], mesh["elsets"]["RIBS"], assume_unique=True)
+                    ]
+                # Remove ribs elsets
+                for elset in list(mesh["elsets"].keys()):
+                    if elset.startswith("RIB"):
+                        del mesh["elsets"][elset]
+                # Enforce rib nodes location
+                mesh["nodes"][np.isin(mesh["nodes"][:, 0], mesh["nsets"]["RIB_0"], assume_unique=True)][:,2] = 0.0
+                mesh["nodes"][np.isin(mesh["nodes"][:, 0], mesh["nsets"]["RIB_P"], assume_unique=True)][:,2] = (self.var["fairing_span"]/(1+self.var["pre_strain"]))
 
                 # initialise a list
                 lines = []
@@ -747,7 +795,6 @@ class FairingGeometry:
                     lines.append(f"*NSET, NSET={set_name}")
                     lines.extend(Utils.ReadWriteOps.format_lines(set_items))
 
-
                 # print orientation
                 lines.extend(
                     [
@@ -759,7 +806,7 @@ class FairingGeometry:
 
                 # define section and material for each part
                 materials = np.intersect1d(np.array(["CORE", "FACESHEET"]), np.array(list(mesh["elsets"].keys())))
-                
+
                 # define facesheet sections
                 if "FACESHEET" in materials:
                     facesheet_sections = np.intersect1d(np.array(["INNER_SURFACE", "OUTER_SURFACE"]), np.array(list(mesh["elsets"].keys())))
@@ -784,7 +831,7 @@ class FairingGeometry:
                 for set_name in ["STRINGERS", "CHEVRONS"]: 
                     lines.extend(
                         [
-                            f"*SHELL SECTION, ELSET={set_name}, MATERIAL=MAT-CORE, ORIENTATION=MAT-AXIS",
+                            f"*SHELL SECTION, ELSET={set_name}, MATERIAL=MAT-CORE",
                             f"{thickness[set_name]}, 5",
                         ]
                     )
@@ -807,12 +854,14 @@ class FairingGeometry:
                     os.path.join(
                         self.directory.case_folder,
                         "inp",
-                        f"{self.case_number}_15_fairing_geometry.inp",
+                        f"{self.case_number}_fairing_geometry.inp",
                     ),
                     "w",
                 ) as f:
                     f.write("\n".join(lines))
 
+            # Create tailored geometry
+            create_tailored_geometry()
 
             # Create shell geometry
             create_shell_geometry()
@@ -930,7 +979,7 @@ class FairingAnalysis(FairingGeometry):
         # Output request
         Output_Requests = [
             "*OUTPUT, FIELD",
-            "*ELEMENT OUTPUT, ELSET=SHELL_EQUIVALENT, DIRECTION=YES",
+            "*ELEMENT OUTPUT, ELSET=OUTER_SURFACE, DIRECTION=YES",
             "SE, SK", # In Material Axis
             "*OUTPUT, HISTORY", 
             "*NODE OUTPUT, NSET=PIVOT",  
@@ -1059,17 +1108,20 @@ class FairingAnalysis(FairingGeometry):
         """
         Evaluate the distortion of the fairing surface as an area weighted average.
         """
+        if 'mesh_data' not in self.__dict__:
+            self.load_mesh_data()
+
+        # surface nodes
+        surface_nodes = self.mesh_data["nsets"]["OUTER_SURFACE"]
+
+        # surface nodes coods
+        surface_nodes_coords = self.mesh_data["nodes"][
+            Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes), 1:
+        ]
+
         increments = len(list(surface_nodes_U.values())[0])
         fairing_distortion = np.zeros((increments))
         for increment in range(increments):
-
-            # surface nodes
-            surface_nodes = self.mesh_data["nsets"]["OUTER_SURFACE"]
-
-            # surface nodes coods
-            surface_nodes_coords = self.mesh_data["nodes"][
-                Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes), 1:
-            ]
 
             # surface nodes displacements
             surface_nodes_displacements = np.array(
@@ -1222,7 +1274,7 @@ class FairingAnalysis(FairingGeometry):
 
         if self.var["model_fidelity"] == "equivalent":
             # Trace Lattice
-            trace_data = Trace(self.directory, self.case_number)
+            trace_data = Tailoring.Tracer(self.directory, self.case_number)
             trace_data.analysis()
 
     @Utils.logger
@@ -1242,28 +1294,48 @@ class FairingAnalysis(FairingGeometry):
         self.post_process_results()
 
 
-
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_8")
+    directory = Utils.Directory(case_name="test_case_9")
+
+    # # RVE
+    # RVE = RVE(
+    #     variables={
+    #         "chevron_wall_length": Utils.Units.mm2m(80.0)
+    #     },
+    #     directory=directory,
+    #     case_number=0
+    # )
+    # RVE.analysis()
 
     # Fairing definition
     fairing = FairingAnalysis(
         directory=directory,
         case_number=0,
+        RVE_identifier=0
     )
     fairing.analysis()
+    # fairing.post_process_results()
 
-    # geometry = FairingAnalysis(
-    #     variables={
-    #         "element_size": 0.020,
-    #         "model_fidelity": "explicit", 
-    #     },
-    #     RVE_identifier=0,
-    #     directory=directory,
-    #     case_number=1,
-    # )
-    # geometry.generate_mesh(bool_show=False)
-    # geometry.run_abaqus()
-    # geometry.extract_fairing_data()
-    # geometry.post_process_results()
+    # # TODO: Add the lattice generation and analysis for explicit model
 
+    tailored = FairingAnalysis(
+        variables={
+            "element_size": 0.020,
+            "solver":"linear",
+            "model_fidelity": "explicit", # either of ["equivalent", "explicit", "fullscale"]
+            "model_fidelity_settings":{
+                "equivalent":{
+                    "bool_isotropic": True, # [True, False], if true core properites use, else equivalent panel properties
+                },
+                "explicit":{
+                    "reference_case": 0, # int, case number of the reference case from which the explicit model is generated
+                    "reference_field": 15, # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+                },
+            },
+        },
+        RVE_identifier=0,
+        directory=directory,
+        case_number=1,
+    )
+    tailored.generate_mesh()
+    tailored.run_abaqus()

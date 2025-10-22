@@ -96,18 +96,15 @@ class Nodes(Set):
             return self.__nodes.shape[0] - 1
 
         # Check for close nodes
-        dist_squared = (np.sum((self.__nodes - new_node) ** 2, axis=1))
-        merge_idx = np.argwhere(dist_squared < tolerance**2).ravel()
-
-        # No close nodes, simply add
-        if merge_idx.size == 0:
+        dist = np.sum((self.__nodes - new_node) ** 2, axis=1)**0.5
+        merge_idx = np.argwhere(dist < tolerance).ravel()
+        
+        if merge_idx.size == 0: # No close nodes, simply add
             self.__nodes = np.r_[self.__nodes, new_node[np.newaxis,:]]
             return self.__nodes.shape[0] - 1
-
-        # Merge close nodes
-        else:
+        
+        else: # Merge close nodes
             merge_idx = merge_idx[0]  # Take the first close node
-            # Merge all close nodes and the new node
             avg = np.mean(np.vstack([self.__nodes[merge_idx], new_node]), axis=0)
             self.__nodes[merge_idx] = avg
             return merge_idx
@@ -369,7 +366,7 @@ class Mesh (Nodes, Elements):
         # Add triangles to the mesh
         self.add_elements(el_list_idx, triangles, elset_name="triangles")
 
-    def add_lines_to_mesh(self, el_list_idx: int, lines, set_name=None):
+    def add_lines_to_mesh(self, el_list_idx: int, lines, set_name=None, tolerance: float = 1e-4) -> None:
         """
         Adds polylines to the mesh as connected elements, creating nodes as necessary.
 
@@ -382,7 +379,7 @@ class Mesh (Nodes, Elements):
             raise ValueError(f"lines must be a list of 2D numpy arrays with shape (n, {self.__nodes.dim})")
 
         for line in lines:
-            indices = self.add_nodes(line, set_name)
+            indices = self.add_nodes(line, set_name, tolerance)
             unique_indices = Utils.unique_1D(indices)
             elements = np.c_[unique_indices[:-1],unique_indices[1:]]
             self.add_elements(el_list_idx, elements, set_name)

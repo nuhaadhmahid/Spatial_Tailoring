@@ -3,7 +3,6 @@ import time
 import traceback
 import pickle
 import json
-from mpl_toolkits import axes_grid1
 import numpy as np
 import subprocess
 import matplotlib.pyplot as plt
@@ -92,6 +91,15 @@ def run_subprocess(command, run_folder, log_file):
             log.write(f"--- STDOUT ---\n{e.stdout}\n")
             log.write(f"--- STDERR ---\n{e.stderr}\n")
 
+class FairingData:
+
+    def __init__(self, case_folder, case_number, hinge_node={}, surface_nodes={}, shell_equivalent={}):
+        self.case_folder = case_folder
+        self.case_number = case_number
+        self.hinge_node = hinge_node
+        self.surface_nodes = surface_nodes
+        self.shell_equivalent = shell_equivalent
+
 class ReadWriteOps:
 
     @staticmethod
@@ -119,7 +127,6 @@ class ReadWriteOps:
                 except UnicodeDecodeError:
                     # for loading python 2 pickles in python 3
                     return pickle.load(f, encoding='latin1')
-
         elif method == "json":
             with open(path + ".json", "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -572,6 +579,48 @@ class GeoOps:
             "outer": outer_aerofoil_coords
         }
 
+    @staticmethod
+    def edge_pairs(element_nodes):
+        """
+        Takes in a 2D array of element connectivity and returns two arrays:
+        1. signed_indices: A 3D array of orientation sign and index of each node-wise edge in the unique_sorted_edge_array.
+        2. unique_sorted_edges: A 2D array of unique sorted edges.
+
+        Parameters:
+            element_nodes (numpy.ndarray): 2D array where each row represents an element defined by node numbers. Minimum of 3 nodes required.
+        """
+
+        if not isinstance(element_nodes, np.ndarray) or element_nodes.ndim != 2 and element_nodes.shape[1]>=3 and element_nodes.dtype in [int, np.int32, np.int64]:
+            raise ValueError(
+                f"Input element_nodes must be a 2D numpy array of integers with atleast 3 nodes in the row. Received {element_nodes.shape}"
+            )
+
+        # create edge list
+        shape = element_nodes.shape
+        rolled_element_nodes = np.roll(element_nodes, shift=-1, axis=1) # -1 shift to shift left
+        edges = np.empty((shape[0], shape[1], 2), dtype=element_nodes.dtype)
+        edges[:, :, 0] = element_nodes
+        edges[:, :, 1] = rolled_element_nodes
+
+        # find unique edges
+        edge_array = edges.reshape(-1, 2)
+        sorted_edge_array = np.sort(edge_array, axis=1)
+        # Retain order of first appearance in unique array
+        _, index = np.unique(sorted_edge_array, axis=0, return_index=True)
+        unique_sorted_edge_array = sorted_edge_array[np.sort(index)]
+
+        # create signed edge labels
+        sign = np.where(np.all(edge_array == sorted_edge_array, axis=1), 1, -1)
+        signed_indices = np.empty((edge_array.shape[0], 2), dtype=int)
+        signed_indices[:, 0] = sign
+        # For each row in sorted_edge_array, find its index in unique_sorted_edges along axis 0
+        idx_in_unique = np.array([np.argwhere((unique_sorted_edge_array == row).all(axis=1))[0][0] for row in sorted_edge_array])
+        signed_indices[:, 1] = idx_in_unique
+
+        # Reshape to element
+        signed_indices = signed_indices.reshape(shape[0], shape[1], 2)
+
+        return signed_indices, unique_sorted_edge_array
 
 class Units:
     """
@@ -976,6 +1025,9 @@ class Plots:
                             color=colours[i], marker='o', markersize=0.15, linewidth=0.5,
                             label=f"{key}" if j==0 else None
                         )
+
+                        
+
 
         # Legend
         handles, labels = ax[0].get_legend_handles_labels()

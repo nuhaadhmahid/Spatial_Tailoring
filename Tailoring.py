@@ -1,14 +1,14 @@
-
+# Tailoring.py
 import Utils
-from Fairing import FairingData
+from Utils import FairingData
+from Mesh import Mesh
 
 import os
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from scipy import interpolate
 
-
-class Lattice:
+class Tracer:
     def __init__(self, directory=Utils.Directory(), case_number:int= 0):
         self.directory = directory
         self.case_number = case_number
@@ -20,6 +20,7 @@ class Lattice:
         # Load data
         self.load_field_data()
         self.load_cell_data()
+        self.load_fairing_data()
         self.load_element_data()
 
     def load_field_data(self):
@@ -35,6 +36,12 @@ class Lattice:
 
         self.cell_dimensions = [RVE_derived["lx"], RVE_derived["ly"], RVE_derived["lz"]]
         self.chevron_angle = RVE_input["chevron_angle"]
+
+    def load_fairing_data(self):
+        FR_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_FR"), "json")
+
+        self.fairing_span = FR_input["fairing_span"]
+        self.fairing_chord = FR_input["fairing_chord"]
 
     def load_element_data(self):
         mesh_data = Utils.ReadWriteOps.load_object(
@@ -295,7 +302,7 @@ class Lattice:
                 ) <= tolerance
             )[:, 1]
         ]) # including undeformed and angles closest to 5, 10, 15, 20 deg
-        print(f"\tLattice field for folding angles (deg): {[f'{angle:.1f}' for angle in np.rad2deg(self.rotation_angles[self.indices])]}")
+        print(f"\tTraced field for folding angles (deg): {[f'{angle:.0f}' for angle in np.rad2deg(self.rotation_angles[self.indices])]}")
 
         # constructing the interpolation function for the principal directions of the field
         self.f_interp = {}
@@ -654,8 +661,8 @@ class Lattice:
         boundary_lines = new_boundary_lines
 
         # trimming at the boundary
-        lines_1 = Lattice.trimming_line(lines_1, boundary_lines, limits)
-        lines_2 = Lattice.trimming_line(lines_2, boundary_lines, limits)
+        lines_1 = Tracer.trimming_line(lines_1, boundary_lines, limits)
+        lines_2 = Tracer.trimming_line(lines_2, boundary_lines, limits)
 
         # boundary
         edge_nodes = np.array([line[index,:] for lines in [lines_1, lines_2] for line in lines for index in [0,-1]])
@@ -756,6 +763,25 @@ class Lattice:
             method="pickle"
         )
 
+    @staticmethod
+    def refine_lines(lines , min_length=0.02):
+        """
+        Refine lines by incrementing points to ensure no segment exceeds min_length.
+        Parameters:
+            lines (list): List of polylines, each as np.ndarray of points with shape (n, 2)
+            min_length (float): Minimum length for each segment in the polyline.
+        Returns:
+            list: List of refined polylines.
+        """
+
+        # Refine lines
+        num_workers = min((os.cpu_count() - 2, len(lines)))    
+        args = [(line, min_length) for line in lines]
+        with ThreadPoolExecutor(num_workers) as executor:
+            lines = list(executor.map(lambda ab: Utils.GeoOps.increment_line(*ab), args))
+
+        return lines
+
     def create_lattice(self,field_type="SE", bool_plot = False):
 
         lines_set = self.trace_lines[field_type]
@@ -786,7 +812,7 @@ class Lattice:
                 lines_2[line_i] = chevron_line
 
             # exerting boundary
-            chordwise, spanwise, ribs, trailing_edge = Lattice.exert_boundary(lines_1, lines_2, self.border_nodes_2D)
+            chordwise, spanwise, ribs, trailing_edge = Tracer.exert_boundary(lines_1, lines_2, self.border_nodes_2D)
 
             # merging the two trailing egdes
             trailing_edge_y = np.sort(np.concatenate(tuple(edge[:,1].astype(np.float32) for edge in trailing_edge), axis=0, dtype=np.float32))
@@ -797,12 +823,12 @@ class Lattice:
                     trailing_edge_y
                 ))
     
-
             # data collection
+            min_length = 0.5e-2*self.fairing_chord
             self.lattice_lines[key] = {
                 "CHEVRONS": spanwise,
-                "STRINGERS": chordwise,
-                "RIBS": ribs,
+                "STRINGERS": self.refine_lines(chordwise, min_length=min_length),
+                "RIBS": self.refine_lines(ribs, min_length=min_length), 
                 "TE_TOP": trailing_edge[0][np.newaxis, ...],
                 "TE_BOTTOM": trailing_edge[1][np.newaxis, ...],
             }
@@ -840,13 +866,329 @@ class Lattice:
         self.trace_streamlines("SE", bool_plot=True)
         # self.trace_streamlines("SK")
         self.create_lattice(bool_plot=True)
+      
+class Lattice:
+
+    def __init__(
+        self,
+        directory: Utils.Directory,
+        case_number: int,
+        reference_case: int = 0,
+        reference_field: int = 0,
+        RVE_identifier: int = 0,
+        trace_lines: Tracer | None = None,
+        grid_data: Tracer | None = None,
+        aerofoil_coords: dict | None = None,
+        tolerance=0.5e-3,
+    ):
+        self.directory = directory
+        self.case_number = case_number
+        self.reference_case = reference_case
+        self.reference_field = reference_field
+        self.RVE_identifier = RVE_identifier
+        self.tolerance = tolerance
+        self.lattice_lines = trace_lines
+        self.grid_data = grid_data
+        self.aerofoil_coords = aerofoil_coords
+
+    def create_fairing_2D(self, min_edge_length=0.02, bool_plot=False):
+        """
+        Creates a 2D mesh from lattice lines for each increment.
+        Uses triangulation to create triangular elements.
+        """
+
+        # Load lattice data
+        if self.lattice_lines is None:
+            lattice_file = os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_lattice_lines.pickle")
+            if os.path.exists(lattice_file):
+                self.lattice_lines = Utils.ReadWriteOps.load_object(
+                    os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_lattice_lines"),
+                    method="pickle"
+                )[f"{self.reference_field}"] 
+            else:
+                print("WARNING: Lattice data not found, now tracing lattice.")
+                lattice = Tracer(self.directory, self.reference_case)
+                lattice.analysis()
+                self.lattice_lines = lattice.lattice_lines[f"{self.reference_field}"]
+
+
+        # Create 2D mesh for each increment
+        self.mesh2D = {}
+        self.mesh2D = Mesh(2, [2,3])
+
+        # Create nodes and groups from lines
+        for group_name, group_lines in self.lattice_lines.items():
+            
+            # Add lines to mesh
+            self.mesh2D.add_lines_to_mesh(0, group_lines, group_name, self.tolerance)
+
+        if bool_plot:
+            print(f"Plotting: rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_lines_2D: nodes {self.mesh2D.nodes.shape}, elements {self.mesh2D.elements[0].shape}")
+            self.mesh2D.plot_2D(
+                el_list_idx=0,
+                bool_nodes=False,
+                bool_elements=True,
+                label=False,
+                save_path=os.path.join(self.directory.case_folder, "fig", f"rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_lines_2D.svg")
+            )
+
+        
+
+        # Triangulate
+        self.mesh2D.triangulate(1, np.arange(self.mesh2D.nodes.shape[0]))
+
+        if bool_plot:
+            print(f"Plotting: rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_2D: nodes {self.mesh2D.nodes.shape}, elements {self.mesh2D.elements[1].shape}")
+            self.mesh2D.plot_2D(
+                el_list_idx=1,
+                bool_nodes=False,
+                bool_elements=True,
+                label=False,
+                save_path=os.path.join(self.directory.case_folder, "fig", f"rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_2D.svg")
+            )
+
+    def init_f_interp_2D_to_3D(self):
+        """
+        Creates an RBF interpolator to map 2D nodes to 3D space.
+        Uses grid data to create the mapping.
+        """
+        # Load grid data
+        if self.grid_data is None:
+            self.grid_data = Utils.ReadWriteOps.load_object(
+                os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_grid_data"),
+                method="pickle"
+            )
+        else:
+            self.grid_data = self.grid_data
+
+        # Interpolation data
+        node_coords_3D = self.grid_data["surface_nodes_coords"][self.grid_data["node_index_grid"]].reshape((-1,3))
+        node_coords_2D = self.grid_data["nodes_grid_2D"].reshape((-1,2))
+
+        # Create RBF interpolator
+        f_interp_2D_to_3D = interpolate.RBFInterpolator(node_coords_2D, node_coords_3D, neighbors=4, kernel='linear')
+
+        return f_interp_2D_to_3D
+
+    def init_f_normals_3D(self):
+        # Load aerofoil coordinates
+        if self.aerofoil_coords is None:
+            self.aerofoil_coords = Utils.ReadWriteOps.load_object(
+                os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_aerofoil_coords"),
+                method="pickle"
+            )
+        else:
+            self.aerofoil_coords = self.aerofoil_coords
+
+        # Interpolate normals at mid-plane
+        coords = self.aerofoil_coords['mid']
+        normals = Utils.GeoOps.normals_2D(coords)
+
+        # RBF interpolation
+        f_normals_3D = interpolate.RBFInterpolator(coords, normals, neighbors=4, kernel='linear')
+
+        return f_normals_3D
+
+    def load_cell_data(self):
+        RVE_derived = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.RVE_identifier}_UC_derived"), "json")
+        RVE_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.RVE_identifier}_UC"), "json")
+
+        self.cell_dimensions = [RVE_derived["lx"], RVE_derived["ly"], RVE_derived["lz"]]
+        self.chevron_angle = RVE_input["chevron_angle"]
+
+    def mapping_2D_to_3D(self, bool_plot=False):
+
+        # Initialize interpolator
+        self.f_interp_2D_to_3D = self.init_f_interp_2D_to_3D()
+        self.f_normals_3D = self.init_f_normals_3D()
+
+        # load panel data
+        self.load_cell_data()
+
+        # Map 2D nodes to 3D
+
+        # Initialize 3D mesh
+        self.mesh3D = Mesh(3, [3])
+
+        # Node indices
+        node_indices_2D = np.arange(self.mesh2D.nodes.shape[0])
+
+        # Map nodes
+        nodes_3D_midplane = self.f_interp_2D_to_3D(self.mesh2D.nodes)
+
+        # Offset nodes in normal direction to create thickness
+        offset = np.zeros_like(nodes_3D_midplane)
+        offset[:,[0,2]] = self.f_normals_3D(nodes_3D_midplane[:,[0,2]]) * self.cell_dimensions[2] / 2.0
+
+        # Create 3D nodes
+        node_indices_3D_outer = self.mesh3D.add_nodes(nodes_3D_midplane-offset, "OUTER_SURFACE")
+        node_indices_3D_inner = self.mesh3D.add_nodes(nodes_3D_midplane+offset, "INNER_SURFACE")
+
+        # Check outer nodes indices are same as mid-plane nodes
+        assert np.all(node_indices_3D_outer == node_indices_2D), "Error in node mapping."
+        # Check inner nodes indices are same size as outer nodes (some inner nodes may be merged)
+        assert np.all(node_indices_3D_inner.size == node_indices_3D_outer.size), "Error in node mapping."
+
+        # helper function to map node indices
+        def map_node_indices(elements, new_indices):
+            return new_indices[elements]
+
+        # create triangle elements
+        for label, new_indices in zip(["OUTER_SURFACE", "INNER_SURFACE"], [node_indices_3D_outer, node_indices_3D_inner]):
+            self.mesh3D.add_elements(
+                0,
+                map_node_indices(
+                    self.mesh2D.elements[1], new_indices
+                ),
+                label,
+            )
+
+        # Create core elements
+        beam_elements = self.mesh2D.elements[0]
+        beam_elsets = self.mesh2D.elsets()[0]
+
+        for label in ["STRINGERS", "CHEVRONS", "RIBS"]:
+
+            # Map inner and outer element sets
+            elements_inner = map_node_indices(beam_elements[beam_elsets[label]], node_indices_3D_inner)
+            elements_outer = map_node_indices(beam_elements[beam_elsets[label]], node_indices_3D_outer)
+
+            # Create elements in 3D mesh
+            elements = []
+            for el_inner, el_outer in zip(elements_inner, elements_outer):
+                # new connectivity for two triangles forming a quad
+                elements.extend([
+                        [el_inner[0], el_outer[1], el_outer[0]],
+                        [el_inner[0], el_inner[1], el_outer[1]]
+                ])
+            elements = np.array(elements, dtype=int)
+
+            # Add elements to mesh
+            self.mesh3D.add_elements(0, elements, label)
+
+        if bool_plot:
+            print(f"Plotting: rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_3D: nodes {self.mesh2D.nodes.shape}, elements {self.mesh2D.elements[0].shape}")
+
+            self.mesh3D.plot_3D(
+                el_list_idx=0,
+                bool_nodes=False,
+                bool_elements=True,
+                label=False,
+                save_path=os.path.join(self.directory.case_folder, "fig", f"rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_3D.svg"),
+                show=False
+            )
+
+    # NOTE: Currently not in use
+    # def validate_midplane_mesh(self):
+
+    #     for increment_key in self.mesh3D.keys():
+    #         # check mesh
+    #         degenerates = self.mesh3D.check_mesh_integrity()
+    #         if degenerates['unused_nodes'].size > 0:
+    #             print("Unused nodes:")
+    #             print(self.mesh3D.nodes[degenerates['unused_nodes']])
+    #         if degenerates['degenerate_beams'].size > 0:
+    #             self.mesh3D.remove_beams(degenerates['degenerate_beams'])
+    #         if degenerates['degenerate_triangles'].size > 0:
+    #             print(self.mesh3D.triangles[degenerates['degenerate_triangles']])
+    #         if degenerates['missing_beam_edges_in_triangles'].size > 0:
+    #             print(f"WARNING: {degenerates['missing_beam_edges_in_triangles'].size} beam edges missing in triangles:")
+    #         degenerates = self.mesh3D.check_mesh_integrity()
+    #         if degenerates['unused_nodes'].size > 0 and degenerates['degenerate_beams'].size > 0 and degenerates['degenerate_triangles'].size > 0 and degenerates['missing_beam_edges_in_triangles'].size > 0:
+    #             raise ValueError("Mesh integrity check failed, degenerates found.")
+
+    #         # check repeated sets
+    #         beam_sets = ["TE_top", "TE_bottom", "Ribs","Chevrons","Stringers"]
+    #         for i, key_i in enumerate(beam_sets):
+    #             for j, key_j in enumerate(beam_sets[i+1:]):
+    #                 repeat_index = np.isin(self.mesh3D.beam_sets[key_j], self.mesh3D.beam_sets[key_i])
+    #                 if np.any(repeat_index):
+    #                     print(f"WARNING: Beams of '{key_i}' repeated in '{key_j}' are removed from '{key_j}'.")
+    #                     self.mesh3D.beam_sets[key_j] = self.mesh3D.beam_sets[key_j][~repeat_index]
+
+    def write_mesh(self):
+        """
+        Writes the mesh to a file using the specified serialization method.
+
+        Parameters:
+            filename (str): The base file path (without extension) where the mesh will be saved.
+        """
+        def format_lines(data_list, items_per_line=16):
+            lines : list[str] = []
+            for i in range(0, len(data_list), items_per_line):
+                chunk = data_list[i:i + items_per_line]
+                lines.append(", ".join(map(str, chunk)) + ("," if i + items_per_line < len(data_list) else ""))
+            return lines
+    
+
+        # initialise
+        lines = []
+
+        # nodes
+        lines.append("*NODE")
+        for i, node in enumerate(self.mesh3D.nodes):
+            i += 1  # Abaqus uses 1-based indexing
+            lines.append("%i, %f, %f, %f" % (i, *node))
+
+        # elements
+        element_type = {2: "B31", 3: "CPS3"}
+        element_count = 0
+        for elements in self.mesh3D.elements:
+            # element header
+            lines.append("*ELEMENT, TYPE=%s" % (element_type[elements.shape[1]]))
+            for i, element in enumerate(elements):
+                i += 1  # Abaqus uses 1-based indexing
+                element += element_count + 1  # Offset for multiple types of elements, Abaqus uses 1-based indexing
+                lines.append(", ".join(map(str, (i, *element))) + ("," if i < len(elements) else ""))
+            # update element count
+            element_count += elements.shape[0]
+
+        # node sets
+        for set_name, set_items in self.mesh3D.nsets().items():
+            lines.append("*NSET, NSET=%s" % (set_name))
+            set_items += 1  # Abaqus uses 1-based indexing
+            lines.extend(format_lines(set_items))
+        # element sets
+        for elset in self.mesh3D.elsets():
+            for set_name, set_items in elset.items():
+                set_items += 1  # Abaqus uses 1-based indexing
+                lines.append("*ELSET, ELSET=%s" % (set_name))
+                lines.extend(format_lines(set_items))
+
+        # write to file
+        with open(os.path.join(self.directory.case_folder, "mesh", f"{self.case_number}_fairing_geometry.inp"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    @Utils.logger
+    def analysis(self, min_edge_length=0.02):
+        print(f"Starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
+        
+        # Create 2D fairing mesh
+        self.create_fairing_2D(min_edge_length=min_edge_length)
+        # Map 2D mesh to 3D
+        self.mapping_2D_to_3D()
+        # Write mesh to file
+        self.write_mesh()
 
 
 if __name__ == "__main__":
     # Example
-    directory = Utils.Directory(case_name="test_case_7")
-    case_number = 0
+    directory = Utils.Directory(case_name="test_case_9")
+    case_number = 1 # current case number
 
     # Trace Lattice
-    lattice_data = Lattice(directory, case_number)
+    lattice_data = Tracer(directory, 0)
     lattice_data.analysis()
+
+    # Reference for traced field
+    reference_case = 0 # reference case for the field data - this must be an equivalent model shell model
+    reference_field = 15 # rotation angle for the folding wingtip at which deformation field is extracted
+
+    # Tailored Geometry
+    tailored = Lattice(directory, case_number, reference_case, reference_field)
+    tailored.analysis()
+
+    # tailored.create_fairing_2D(bool_plot=True)
+    # tailored.mapping_2D_to_3D(bool_plot=True)
+    # # tailored.write_mesh()
+
