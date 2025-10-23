@@ -549,35 +549,35 @@ class FairingGeometry:
                         lines.append("*TRANSVERSE SHEAR STIFFNESS")
                         lines.extend(Utils.ReadWriteOps.format_lines(shell_general_shear_data, 8))
 
-                    # create trailing edge rigid body elements
-                    if all(set in self.mesh_data["nsets"] for set in ["TE_TOP", "TE_BOTTOM"]):
-                        # node indices
-                        top_nodes_idx = np.setdiff1d(
-                            self.mesh_data["nsets"]["TE_TOP"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
-                        ) - 1 # node number starts from 1 but the index starts from 0
-                        bottom_nodes_idx = np.setdiff1d(
-                            self.mesh_data["nsets"]["TE_BOTTOM"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
-                        ) - 1 # node number starts from 1 but the index starts from 0
+                # create trailing edge rigid body elements
+                if all(set in self.mesh_data["nsets"] for set in ["TE_TOP", "TE_BOTTOM"]):
+                    # node indices
+                    top_nodes_idx = np.setdiff1d(
+                        self.mesh_data["nsets"]["TE_TOP"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
+                    ) - 1 # node number starts from 1 but the index starts from 0
+                    bottom_nodes_idx = np.setdiff1d(
+                        self.mesh_data["nsets"]["TE_BOTTOM"], self.mesh_data["nsets"]["RIBS"], assume_unique=True
+                    ) - 1 # node number starts from 1 but the index starts from 0
 
-                        # arranged node indices along Y-axis
-                        top_nodes_idx = top_nodes_idx[np.argsort(self.mesh_data["nodes"][top_nodes_idx][:,2], axis=0)]
-                        bottom_nodes_idx = bottom_nodes_idx[np.argsort(self.mesh_data["nodes"][bottom_nodes_idx][:,2], axis=0)]
+                    # arranged node indices along Y-axis
+                    top_nodes_idx = top_nodes_idx[np.argsort(self.mesh_data["nodes"][top_nodes_idx][:,2], axis=0)]
+                    bottom_nodes_idx = bottom_nodes_idx[np.argsort(self.mesh_data["nodes"][bottom_nodes_idx][:,2], axis=0)]
 
-                        # Create rigid body constraints
-                        if top_nodes_idx.size == bottom_nodes_idx.size:
-                            lines.append("*MPC")
-                            for top_idx, bottom_idx in zip(top_nodes_idx, bottom_nodes_idx):
-                                lines.append(f"BEAM, {top_idx+1}, {bottom_idx+1}")
+                    # Create rigid body constraints
+                    if top_nodes_idx.size == bottom_nodes_idx.size:
+                        lines.append("*MPC")
+                        for top_idx, bottom_idx in zip(top_nodes_idx, bottom_nodes_idx):
+                            lines.append(f"BEAM, {top_idx+1}, {bottom_idx+1}")
 
-                    if bool_plot:
-                        # plots for debugging
-                        top_coords = self.mesh_data["nodes"][np.ix_(top_nodes_idx,[2,3])]
-                        bottom_coords = self.mesh_data["nodes"][np.ix_(bottom_nodes_idx,[2,3])]
-                        Utils.Plots.node_coupling(top_coords, bottom_coords, xlabel="Y", ylabel="Z", save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_trailing_edge_coupling.png"))
+                if bool_plot:
+                    # plots for debugging
+                    top_coords = self.mesh_data["nodes"][np.ix_(top_nodes_idx,[2,3])]
+                    bottom_coords = self.mesh_data["nodes"][np.ix_(bottom_nodes_idx,[2,3])]
+                    Utils.Plots.node_coupling(top_coords, bottom_coords, xlabel="Y", ylabel="Z", save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_trailing_edge_coupling.png"))
 
-                        slave_coords = self.mesh_data["nodes"][np.ix_(self.mesh_data["nsets"]["RIB_P"]-1,[1,3])]
-                        master_coords = self.mesh_data["nodes"][np.ix_(self.mesh_data["nsets"]["PIVOT"]-1,[1,3])] * np.ones_like(slave_coords)
-                        Utils.Plots.node_coupling(master_coords, slave_coords, xlabel="X", ylabel="Z", save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_pivoting_rib_coupling.png"))
+                    slave_coords = self.mesh_data["nodes"][np.ix_(self.mesh_data["nsets"]["RIB_P"]-1,[1,3])]
+                    master_coords = self.mesh_data["nodes"][np.ix_(self.mesh_data["nsets"]["PIVOT"]-1,[1,3])] * np.ones_like(slave_coords)
+                    Utils.Plots.node_coupling(master_coords, slave_coords, xlabel="X", ylabel="Z", save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_pivoting_rib_coupling.png"))
 
                 # saving file
                 with open(
@@ -720,7 +720,8 @@ class FairingGeometry:
                 # Mesh generation
                 gmsh.option.setNumber("Mesh.MeshSizeMax", self.var["element_size"])
                 MESH.generate(2)
-                MESH.optimize()
+                MESH.optimize("UntangleMeshGeometry")
+                MESH.optimize("Relocate3D")
 
                 # Printing options
                 gmsh.option.setNumber("Mesh.SaveGroupsOfElements", -100)
@@ -1285,7 +1286,7 @@ class FairingAnalysis(FairingGeometry):
         self.generate_mesh()
 
         # Run simulation
-        self.run_abaqus()
+        self.run_abaqus(num_core=10)
 
         # Extract results
         self.extract_fairing_data()
@@ -1307,21 +1308,21 @@ if __name__ == "__main__":
     # )
     # RVE.analysis()
 
-    # Fairing definition
-    fairing = FairingAnalysis(
-        directory=directory,
-        case_number=0,
-        RVE_identifier=0
-    )
-    fairing.analysis()
-    # fairing.post_process_results()
+    # # Fairing definition
+    # fairing = FairingAnalysis(
+    #     directory=directory,
+    #     case_number=0,
+    #     RVE_identifier=0
+    # )
+    # fairing.analysis()
+    # # fairing.post_process_results()
 
     # # TODO: Add the lattice generation and analysis for explicit model
 
     tailored = FairingAnalysis(
         variables={
-            "element_size": 0.020,
-            "solver":"linear",
+            "element_size": 0.010,
+            "solver":"dynamic",
             "model_fidelity": "explicit", # either of ["equivalent", "explicit", "fullscale"]
             "model_fidelity_settings":{
                 "equivalent":{
@@ -1329,7 +1330,7 @@ if __name__ == "__main__":
                 },
                 "explicit":{
                     "reference_case": 0, # int, case number of the reference case from which the explicit model is generated
-                    "reference_field": 15, # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+                    "reference_field": 0, # int, rotation angle for the folding wingtip from whose deformation the field is extracted
                 },
             },
         },

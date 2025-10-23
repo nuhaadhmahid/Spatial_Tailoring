@@ -1,4 +1,6 @@
 # Tailoring.py
+from numpy.char import capitalize
+from numpy.strings import lower
 import Utils
 from Utils import FairingData
 from Mesh import Mesh
@@ -20,7 +22,6 @@ class Tracer:
         # Load data
         self.load_field_data()
         self.load_cell_data()
-        self.load_fairing_data()
         self.load_element_data()
 
     def load_field_data(self):
@@ -36,12 +37,6 @@ class Tracer:
 
         self.cell_dimensions = [RVE_derived["lx"], RVE_derived["ly"], RVE_derived["lz"]]
         self.chevron_angle = RVE_input["chevron_angle"]
-
-    def load_fairing_data(self):
-        FR_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_FR"), "json")
-
-        self.fairing_span = FR_input["fairing_span"]
-        self.fairing_chord = FR_input["fairing_chord"]
 
     def load_element_data(self):
         mesh_data = Utils.ReadWriteOps.load_object(
@@ -604,8 +599,8 @@ class Tracer:
             intersection_points.sort(key=lambda x: x[1])
             
             # If we have too many intersections, the line might be too close to the boundary and cause numerical issues, so we skip it
-            intersection_threshold = 10
-            if len(intersection_points) >= intersection_threshold:
+            intersection_threshold = 6
+            if len(intersection_points) > intersection_threshold:
                 print(f"\tWARNING: Line {i} is removed due to close proximity to the border with {len(intersection_points)} intersections")
                 continue
                 
@@ -686,11 +681,16 @@ class Tracer:
         ), dtype=object)
         # trailing edge
         trailing_edge = np.empty(2, dtype=object)
-        trailing_edge[0] = np.array((l[np.argsort(l[:,1], axis=0, kind='stable'),:]))
-        trailing_edge[1] = np.array((r[np.argsort(r[:,1], axis=0, kind='stable'),:]))
+        trailing_edge_l = l[np.argsort(l[:,1], axis=0, kind='stable'),:]
+        trailing_edge_r = r[np.argsort(r[:,1], axis=0, kind='stable'),:]
+        y_mean_l = trailing_edge_l[:,0].mean()
+        y_mean_r = trailing_edge_r[:,0].mean()
+        trailing_edge_r[:,0] = y_mean_r
+        trailing_edge_l[:,0] = y_mean_l
+        trailing_edge[0] = np.array(trailing_edge_r)
+        trailing_edge[1] = np.array(trailing_edge_l)
 
         return lines_1, lines_2, ribs, trailing_edge
-
 
     def trace_streamlines(self, field_type="SE", clearance=0.2, starting_points=None, bool_plot = False):
 
@@ -763,25 +763,6 @@ class Tracer:
             method="pickle"
         )
 
-    @staticmethod
-    def refine_lines(lines , min_length=0.02):
-        """
-        Refine lines by incrementing points to ensure no segment exceeds min_length.
-        Parameters:
-            lines (list): List of polylines, each as np.ndarray of points with shape (n, 2)
-            min_length (float): Minimum length for each segment in the polyline.
-        Returns:
-            list: List of refined polylines.
-        """
-
-        # Refine lines
-        num_workers = min((os.cpu_count() - 2, len(lines)))    
-        args = [(line, min_length) for line in lines]
-        with ThreadPoolExecutor(num_workers) as executor:
-            lines = list(executor.map(lambda ab: Utils.GeoOps.increment_line(*ab), args))
-
-        return lines
-
     def create_lattice(self,field_type="SE", bool_plot = False):
 
         lines_set = self.trace_lines[field_type]
@@ -824,11 +805,10 @@ class Tracer:
                 ))
     
             # data collection
-            min_length = 0.5e-2*self.fairing_chord
             self.lattice_lines[key] = {
                 "CHEVRONS": spanwise,
-                "STRINGERS": self.refine_lines(chordwise, min_length=min_length),
-                "RIBS": self.refine_lines(ribs, min_length=min_length), 
+                "STRINGERS": chordwise,
+                "RIBS": ribs,
                 "TE_TOP": trailing_edge[0][np.newaxis, ...],
                 "TE_BOTTOM": trailing_edge[1][np.newaxis, ...],
             }
@@ -836,9 +816,10 @@ class Tracer:
             if bool_plot:
                 Utils.Plots.grid_split(
                     {
-                        "coords": self.centroids_grid_2D,
+                        #"coords": self.centroids_grid_2D, # centroids
+                        "coords": self.nodes_grid_2D, # nodes
                         # "border": self.border_nodes_2D,
-                        "lines": self.lattice_lines[key]
+                        "lines": {name.capitalize(): values for name, values in self.lattice_lines[key].items() if name!="TE_BOTTOM" and name!="TE_TOP"} | {"TRAILING_EDGE".capitalize():np.r_[*list(self.lattice_lines[key][name]for name in ["TE_TOP", "TE_BOTTOM"])]}
                     },
                     os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_lattice_2D_{field_type}_{key}.svg"),
                     show=False
@@ -879,6 +860,7 @@ class Lattice:
         trace_lines: Tracer | None = None,
         grid_data: Tracer | None = None,
         aerofoil_coords: dict | None = None,
+        fairing_chord: float | None = None,
         tolerance=0.5e-3,
     ):
         self.directory = directory
@@ -886,10 +868,30 @@ class Lattice:
         self.reference_case = reference_case
         self.reference_field = reference_field
         self.RVE_identifier = RVE_identifier
-        self.tolerance = tolerance
         self.lattice_lines = trace_lines
         self.grid_data = grid_data
         self.aerofoil_coords = aerofoil_coords
+        self.fairing_chord = fairing_chord
+        self.tolerance = tolerance
+
+    @staticmethod
+    def refine_lines(lines , min_length=0.02):
+        """
+        Refine lines by incrementing points to ensure no segment exceeds min_length.
+        Parameters:
+            lines (list): List of polylines, each as np.ndarray of points with shape (n, 2)
+            min_length (float): Minimum length for each segment in the polyline.
+        Returns:
+            list: List of refined polylines.
+        """
+
+        # Refine lines
+        num_workers = min((os.cpu_count() - 2, len(lines)))    
+        args = [(line, min_length) for line in lines]
+        with ThreadPoolExecutor(num_workers) as executor:
+            lines = list(executor.map(lambda ab: Utils.GeoOps.increment_line(*ab), args))
+
+        return lines
 
     def create_fairing_2D(self, min_edge_length=0.02, bool_plot=False):
         """
@@ -911,6 +913,14 @@ class Lattice:
                 lattice.analysis()
                 self.lattice_lines = lattice.lattice_lines[f"{self.reference_field}"]
 
+        if self.fairing_chord is None:
+            FR_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_FR"), "json")
+            self.fairing_chord = FR_input["fairing_chord"]
+
+        # Refine lines
+        min_length = 1e-2*self.fairing_chord
+        for key in self.lattice_lines.keys():
+            self.lattice_lines[key] = self.refine_lines(self.lattice_lines[key], min_length)
 
         # Create 2D mesh for each increment
         self.mesh2D = {}
@@ -918,7 +928,6 @@ class Lattice:
 
         # Create nodes and groups from lines
         for group_name, group_lines in self.lattice_lines.items():
-            
             # Add lines to mesh
             self.mesh2D.add_lines_to_mesh(0, group_lines, group_name, self.tolerance)
 
@@ -931,8 +940,6 @@ class Lattice:
                 label=False,
                 save_path=os.path.join(self.directory.case_folder, "fig", f"rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_lines_2D.svg")
             )
-
-        
 
         # Triangulate
         self.mesh2D.triangulate(1, np.arange(self.mesh2D.nodes.shape[0]))
@@ -997,6 +1004,9 @@ class Lattice:
         self.chevron_angle = RVE_input["chevron_angle"]
 
     def mapping_2D_to_3D(self, bool_plot=False):
+        """
+        Maps 2D mesh nodes to 3D space using RBF interpolation. Merges trailing edge nodes in the inner surface.
+        """
 
         # Initialize interpolator
         self.f_interp_2D_to_3D = self.init_f_interp_2D_to_3D()
@@ -1005,7 +1015,11 @@ class Lattice:
         # load panel data
         self.load_cell_data()
 
-        # Map 2D nodes to 3D
+        # collecting and verifying trailing edge nodes
+        nset_TE_TOP = self.mesh2D.nsets()["TE_TOP"]
+        nset_TE_BOTTOM = self.mesh2D.nsets()["TE_BOTTOM"]
+        assert nset_TE_TOP.size == nset_TE_BOTTOM.size, "Error in trailing edge node sets."
+        assert np.allclose(self.mesh2D.nodes[nset_TE_TOP, 1], self.mesh2D.nodes[nset_TE_BOTTOM, 1]), "Error in trailing edge node Y-coords."
 
         # Initialize 3D mesh
         self.mesh3D = Mesh(3, [3])
@@ -1021,8 +1035,20 @@ class Lattice:
         offset[:,[0,2]] = self.f_normals_3D(nodes_3D_midplane[:,[0,2]]) * self.cell_dimensions[2] / 2.0
 
         # Create 3D nodes
+        # For outer nodes
         node_indices_3D_outer = self.mesh3D.add_nodes(nodes_3D_midplane-offset, "OUTER_SURFACE")
-        node_indices_3D_inner = self.mesh3D.add_nodes(nodes_3D_midplane+offset, "INNER_SURFACE")
+        
+        # For inner nodes, skipping trailing edge nodes (they will be merged later)
+        node_indices_3D_inner = np.zeros(node_indices_3D_outer.shape[0], dtype=int)
+        inner_nodes = nodes_3D_midplane+offset
+        non_TE_mask = ~(np.isin(node_indices_2D, nset_TE_TOP) | np.isin(node_indices_2D, nset_TE_BOTTOM))
+        node_indices_3D_inner[non_TE_mask] = self.mesh3D.add_nodes(inner_nodes[non_TE_mask], "INNER_SURFACE")
+
+        # Merging trailing edge nodes
+        node_TE = (inner_nodes[nset_TE_BOTTOM] + inner_nodes[nset_TE_TOP]) / 2.0
+        node_indices = self.mesh3D.add_nodes(node_TE, "INNER_SURFACE")
+        node_indices_3D_inner[nset_TE_BOTTOM] = node_indices
+        node_indices_3D_inner[nset_TE_TOP] = node_indices
 
         # Check outer nodes indices are same as mid-plane nodes
         assert np.all(node_indices_3D_outer == node_indices_2D), "Error in node mapping."
@@ -1186,9 +1212,9 @@ if __name__ == "__main__":
 
     # Tailored Geometry
     tailored = Lattice(directory, case_number, reference_case, reference_field)
-    tailored.analysis()
+    # tailored.analysis()
 
-    # tailored.create_fairing_2D(bool_plot=True)
-    # tailored.mapping_2D_to_3D(bool_plot=True)
-    # # tailored.write_mesh()
+    tailored.create_fairing_2D(bool_plot=True)
+    tailored.mapping_2D_to_3D(bool_plot=True)
+    tailored.write_mesh()
 
