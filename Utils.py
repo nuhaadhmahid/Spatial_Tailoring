@@ -1,0 +1,1079 @@
+import os
+import time
+import traceback
+import pickle
+import json
+import numpy as np
+import subprocess
+import matplotlib.pyplot as plt
+
+
+def logger(func):
+    """Decorator to log the execution time of a function."""
+
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            result = func(*args, **kwargs)
+            print(
+                f"\t\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} completed in "
+                f"{time.time() - start:.2f}s"
+            )
+            return result
+        except:
+            print(
+                f"\t\tUPDATE: {func.__name__} for {args[0].directory.case_name} - {args[0].case_number} failed to complete"
+            )
+            print(traceback.format_exc())
+            return None
+
+    return wrapper
+
+def run_analysis(job):
+    """
+    Top-level function used for parallel execution of the analysis method of the given job object.
+    """
+    job.analysis()
+
+def indexed_function_caller(func, num, *args):
+    """
+    Wrapper function to unpack arguments for multiprocessing.
+    """
+    if not callable(func):
+        raise ValueError("func must be a callable function")
+
+    return np.array((*args[:num], func(*args[num:])), dtype=object)
+
+def indices(A, B):
+    """
+    For 1D arrays A and B, returns the indices of B values in A in the order the values exist in B
+
+    :param A: 1D numpy array
+    :param B: 1D numpy array
+    :return: 1D numpy array of indices
+    """
+    sort_idx = np.argsort(A)
+    indices_B_in_A = sort_idx[np.searchsorted(A, B, sorter=sort_idx)]
+    return np.array(indices_B_in_A)
+
+def unique_1D(A):
+    """
+    Returns the unique values in array A while preserving the original order.
+    """
+    _, idx = np.unique(A, return_index=True)
+    return A[np.sort(idx)]
+
+def run_subprocess(command, run_folder, log_file):
+    """Runs a shell command and captures its output."""
+    try:
+        process = subprocess.run(
+            command,
+            shell=True,
+            check=True,
+            cwd=run_folder,
+            input="y",
+            text=True,
+            capture_output=True,
+        )
+        with open(log_file, "a") as log:
+            log.write(f"--- LOG TIME : {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log.write(f"--- COMMAND : {command}\n")
+            log.write(f"--- STDOUT ---\n{process.stdout}")
+            log.write(f"--- STDERR ---\n{process.stderr}")
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Execution failed for command:\n{command}.")
+        print(f"Return code: {e.returncode}")
+        print(f"--- STDOUT ---\n{e.stdout}")
+        print(f"--- STDERR ---\n{e.stderr}")
+        with open(log_file, "a") as log:
+            log.write(f"ERROR: Execution failed for command:\n{command}.\n")
+            log.write(f"Return code: {e.returncode}\n")
+            log.write(f"--- STDOUT ---\n{e.stdout}\n")
+            log.write(f"--- STDERR ---\n{e.stderr}\n")
+
+class FairingData:
+
+    def __init__(self, case_folder, case_number, hinge_node={}, surface_nodes={}, shell_equivalent={}):
+        self.case_folder = case_folder
+        self.case_number = case_number
+        self.hinge_node = hinge_node
+        self.surface_nodes = surface_nodes
+        self.shell_equivalent = shell_equivalent
+
+class ReadWriteOps:
+
+    @staticmethod
+    def save_object(obj, path, method):
+        """Saves an object to a file using the specified method."""
+        if method == "pickle":
+            with open(path + ".pickle", "wb") as f:
+                pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+        elif method == "json":
+            with open(path + ".json", "w") as f:
+                json.dump(obj, f, indent=4)
+        else:
+            print("ERROR: Wrong file saving method")
+
+    @staticmethod
+    def load_object(path, method):
+        """
+        Loads an object from a file using the specified method.
+        For reading files pickled in python 2 to python 3 set encoding to 'latin1'.
+        """
+        if method == "pickle":
+            with open(path + ".pickle", "rb") as f:
+                try:
+                    return pickle.load(f)
+                except UnicodeDecodeError:
+                    # for loading python 2 pickles in python 3
+                    return pickle.load(f, encoding='latin1')
+        elif method == "json":
+            with open(path + ".json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        else:
+            print("ERROR: Wrong file loading method")
+            return None
+
+    @staticmethod
+    def format_lines(data_list, items_per_line=16):
+        """
+        Formats a list of data into a string with a specified number of items per line.
+
+        Parameters:
+            data_list: The list of data to format.
+            items_per_line: The number of items to include in each line.
+        """
+        lines: list[str] = []
+        for i in range(0, len(data_list), items_per_line):
+            chunk = data_list[i : i + items_per_line]
+            lines.append(
+                ", ".join(map(str, chunk))
+                + ("," if i + items_per_line < len(data_list) else "")
+            )
+        return lines
+
+    @staticmethod
+    def read_mesh_data(file_path):
+        """
+        Reads node, element, and set data from a GMSH-generated .inp file.
+        """
+
+        # output container
+        mesh_data = {
+            "nodes": [],
+            "elements": {},
+            "elsets": {},
+            "nsets": {},
+        }
+
+        # Open the mesh file and read its contents
+        with open(file_path,"r") as file:
+            lines = file.read().splitlines()
+
+        # number of items for each element
+        def num_element_data(type_label):
+            """
+            Return number of element items (i.e., label + number of nodes) for solid, shell and beam element using GMSH element types.
+            """
+            if type_label.startswith("C3D"): # solid element
+                return int(type_label.strip("C3D")) + 1
+            elif type_label.startswith("CPS"): # shell element
+                return int(type_label.strip("CPS")) + 1
+            elif type_label.startswith("T3D"): # beam element
+                return int(type_label.strip("T3D")) + 1
+            else:
+                raise ValueError(f"Unknown element type: {type_label}")
+
+        # reach mesh content
+        temp_list = []
+        section = None
+        current_set = None
+        for line in lines:
+            if line.startswith("*NODE"):
+                section = "nodes"
+            elif line.startswith("*ELEMENT"):
+                section = "elements"
+                current_type = line.strip().split(",")[1].split("=")[1]
+                num_items_per_element = num_element_data(current_type)
+                if current_type not in mesh_data["elements"]:
+                    mesh_data["elements"][current_type] = []
+            elif line.startswith("*ELSET"):
+                section = "elsets"
+                current_set = line.split(",")[1].split("=")[1].strip()
+                mesh_data["elsets"][current_set] = []
+            elif line.startswith("*NSET"):
+                section = "nsets"
+                current_set = line.split(",")[1].split("=")[1].strip()
+                mesh_data["nsets"][current_set] = []
+            elif line.startswith("*"):
+                section = None
+            elif section:
+                items = [item.strip() for item in line.split(",") if item.strip()]
+                if section == "nodes":
+                    mesh_data["nodes"].append(list(map(float, items)))
+                elif section == "elements":
+                    temp_list.extend(list(map(int, items)))
+                    if (
+                        len(temp_list) == num_items_per_element
+                    ):  # number of nodes in each element
+                        mesh_data["elements"][current_type].append(
+                            temp_list
+                        )  # element number and node numbers
+                        temp_list = []
+                elif section == "elsets":
+                    mesh_data["elsets"][current_set].extend(map(int, items))
+                elif section == "nsets":
+                    mesh_data["nsets"][current_set].extend(map(int, items))
+
+        # Convert element type
+        for key in list(mesh_data["elements"].keys()):
+            if key.startswith("CPS"):  # shell elements
+                mesh_data["elements"]["S" + key[3:] + "R"] = mesh_data["elements"].pop(key)
+            else:
+                raise ValueError(f"ERROR: Unrecognised element type {key}")
+
+        # Convert lists to numpy arrays
+        mesh_data["nodes"] = np.array(mesh_data["nodes"], dtype=object)
+        mesh_data["nodes"][:, 0] = mesh_data["nodes"][:, 0].astype(np.int32)
+        mesh_data["nodes"][:, 1:] = mesh_data["nodes"][:, 1:].astype(np.float64)
+        for key in mesh_data["elements"]:
+            mesh_data["elements"][key] = np.array(mesh_data["elements"][key], dtype=np.int32)
+
+        # defining sets
+        for key in mesh_data["elsets"]:
+            mesh_data["elsets"][key] = np.array(
+                mesh_data["elsets"][key], dtype=np.int32
+            )
+        for key in mesh_data["nsets"]:
+            mesh_data["nsets"][key] = np.array(mesh_data["nsets"][key], dtype=np.int32)
+
+        # Updating the element numbering to start from 1
+        # Collecting original element numbers
+        original_element_numbers = np.empty((0), dtype=np.int32)
+        for elements in mesh_data["elements"].values():
+            original_element_numbers = np.concatenate((original_element_numbers, elements[:, 0].copy()), axis=0)
+        # Updating the element numbering to start from 1
+        for key in mesh_data["elements"].keys():
+            mesh_data["elements"][key][:, 0] = indices(original_element_numbers, mesh_data["elements"][key][:, 0]) + 1
+            # mesh_data["elements"][key][:, 0] = np.argwhere(original_element_numbers == mesh_data["elements"][key][:, 0]).flatten() + 1
+        for key in mesh_data["elsets"]:
+            mesh_data["elsets"][key] = indices(original_element_numbers, mesh_data["elsets"][key]) + 1
+
+        return mesh_data
+
+
+class GeoOps:
+    """
+    A class collecting functions for geometric operations
+    """
+
+    @staticmethod
+    def normals_2D(points):
+        """
+        Calculate the normal vector at a point on a 2D curve.
+
+        Parameters:
+            points (numpy.ndarray): Array of shape (n, 2)
+
+        Returns:
+            numpy.ndarray: Unit normal vector at the point
+        """
+        if not isinstance(points, np.ndarray) or points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(
+                f"Input points must be an array of shape (n, 2). Received {points.shape}"
+            )
+
+        # initialise
+        normals = np.empty(points.shape)
+        # edges
+        edges = np.diff(points, axis=0) 
+        # perpendicular vectors
+        normals[0] = (-edges[0, 1], edges[0, 0]) # forward difference
+        normals[1:-1,:] = np.column_stack(( # central difference
+            - np.c_[edges[:-1, 1],edges[1:, 1]].mean(axis=1), 
+            + np.c_[edges[:-1, 0],edges[1:, 0]].mean(axis=1),
+        ))  
+        normals[-1] = (-edges[-1, 1], edges[-1, 0]) # backward difference
+        # normalising vector
+        magnitudes = np.linalg.norm(normals, axis=1)
+        normals = normals / magnitudes[:, np.newaxis]  
+
+        return normals    
+
+    @staticmethod
+    def intersection_point(line_1, line_2):
+            """
+            Calculate the intersection point of two lines defined by multiple points each.
+            """
+            # findingg the closest indexes
+            matrix = line_1[:, None]-line_2[None, :]
+            dist_squared_matrix = np.sum(np.power(matrix,2), axis=2)
+            index = np.unravel_index(np.argmin(dist_squared_matrix),dist_squared_matrix.shape)
+
+            # using line segements to find intersection points
+            for i in range(max([0,index[0]-1]), min([index[0]+1, line_1.shape[0]-1])): # index for line 1
+                for j in range(max([0,index[1]-1]), min([index[1]+1, line_2.shape[0]-1])): # index for line 2
+                    try:
+                        # parametrise the line segment with range 0 to 1
+                        # https://en.wikipedia.org/wiki/Line%E2%80%93line_intersection
+                        x1, y1 = line_1[i, 0], line_1[i, 1]
+                        x2, y2 = line_1[i+1, 0], line_1[i+1, 1]
+                        x3, y3 = line_2[j, 0], line_2[j, 1]
+                        x4, y4 = line_2[j+1, 0], line_2[j+1, 1]
+                        denom = ((x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)) + np.finfo(float).eps # to avoid division by zero
+                        t1 = ((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/denom
+                        t2 = -((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))/denom
+
+                        # check the parameter range to verify if the point is with the segment
+                        if all([t1>=0.0, t1<=1.0, t2>=0.0, t2<=1.0]):
+                            # found intersection
+                            return np.array([x1+t1*(x2-x1), y1+t1*(y2-y1)]), np.array([i,j])
+                        
+                        # just for debugging
+                        # print(t1, t2, (x1,y1), (x2,y2), (x3,y3), (x4,y4))
+
+                    except:
+                        #pass
+                        traceback.print_exc()
+
+
+            # no intersection
+            return np.array([np.nan, np.nan]), np.array([np.nan, np.nan])
+
+    @staticmethod
+    def bisect_line(line):
+        """
+        Bisects each pair of consecutive lines by computing their midpoints and interleaving them with the original lines.
+        Parameters
+            lines : np.ndarray : An array of shape (N, M) representing N lines, each with M coordinates.
+        Returns     
+            np.ndarray : An array of shape (2*N - 1, M) containing the original lines and their midpoints interleaved.
+        """
+        if not isinstance(line, np.ndarray) or line.ndim != 2 or line.shape[0] < 2:
+            raise ValueError(
+                f"Input line must be a 2D numpy array with at least 2 points. Received {line.shape}"
+            )
+        midpoints = line[:-1] + np.diff(line, axis=0) / 2.0
+        new_line = np.empty(
+            (line.shape[0] + midpoints.shape[0], line.shape[1]), dtype=line.dtype
+        )
+        new_line[0::2] = line
+        new_line[1::2] = midpoints
+        return new_line
+    
+    @staticmethod
+    def increment_line(line, increment_size):
+        """
+        Increments each point in the line by a specified size.
+        Parameters
+            lines : np.ndarray : An array of shape (N, M) representing N lines, each with M coordinates.
+        Returns     
+            np.ndarray : An array of shape (2*N - 1, M) containing the original lines and their midpoints interleaved.
+        """
+        if not isinstance(line, np.ndarray) or line.ndim != 2 or line.shape[0] < 2:
+            raise ValueError(
+                f"Input line must be a 2D numpy array with at least 2 points. Received {line.shape}"
+            )
+        if not isinstance(increment_size, (int, float)) or increment_size <= 0:
+            raise ValueError(
+                f"Increment size must be a positive number. Received {increment_size}"
+            )
+
+        # Compute distances and increments
+        dists = np.sum(np.diff(line, axis=0)**2, axis=1)**0.5
+        increments = np.floor(dists / increment_size).astype(int)
+
+        # Initialise new line
+        num_points = sum(increments) + 1
+        new_line = np.zeros((num_points, line.shape[1]))
+
+        # New line
+        points = [line[0]]
+        for idx, inc in enumerate(increments):
+            if inc > 0:
+                segment = np.linspace(line[idx], line[idx + 1], inc + 1)[1:]
+                points.extend(segment)
+            else:
+                points.append(line[idx + 1])
+        new_line = np.array(points)
+
+        return new_line
+
+    @staticmethod
+    def generate_naca_4digit(naca_code, num_points=100):
+        """
+        Generate coordinates for a NACA 4-digit airfoil.
+
+        Parameters:
+        naca_code (str): NACA 4-digit code (e.g., "0012", "2412")
+        num_points (int): Number of points on each surface (upper and lower)
+
+        Returns:
+        numpy.ndarray: Array of [x, y] coordinates
+        """
+        # Parse NACA digits
+        m = int(naca_code[0]) / 100.0  # Maximum camber
+        p = int(naca_code[1]) / 10.0  # Location of maximum camber
+        t = int(naca_code[2:]) / 100.0  # Maximum thickness
+
+        # Generate x-coordinates (cosine spacing for better point distribution)
+        beta = np.linspace(0, np.pi, num_points)
+        x = (1.0 - np.cos(beta)) / 2.0
+
+        # Calculate thickness distribution
+        a0 = 0.2969
+        a1 = -0.1260
+        a2 = -0.3516
+        a3 = 0.2843
+        a4 = -0.1015  # For closed trailing edge use -0.1036
+
+        yt = 5 * t * (a0 * np.sqrt(x) + a1 * x + a2 * x**2 + a3 * x**3 + a4 * x**4)
+
+        if m == 0:  # Symmetric airfoil
+            xu = x
+            yu = yt
+            xl = x
+            yl = -yt
+        else:  # Cambered airfoil
+            # Mean camber line
+            yc = np.zeros_like(x)
+            dyc_dx = np.zeros_like(x)
+
+            # For x < p
+            mask_p = x <= p
+            yc[mask_p] = m * (2 * p * x[mask_p] - x[mask_p] ** 2) / p**2
+            dyc_dx[mask_p] = 2 * m * (p - x[mask_p]) / p**2
+
+            # For x >= p
+            mask_1p = x > p
+            yc[mask_1p] = (
+                m * ((1 - 2 * p) + 2 * p * x[mask_1p] - x[mask_1p] ** 2) / (1 - p) ** 2
+            )
+            dyc_dx[mask_1p] = 2 * m * (p - x[mask_1p]) / (1 - p) ** 2
+
+            # Calculate theta
+            theta = np.arctan(dyc_dx)
+
+            # Calculate upper and lower surface coordinates
+            xu = x - yt * np.sin(theta)
+            yu = yc + yt * np.cos(theta)
+            xl = x + yt * np.sin(theta)
+            yl = yc - yt * np.cos(theta)
+
+        # Combine upper and lower surface coordinates
+        # Start from trailing edge, go over the top surface to leading edge,
+        # then from leading edge to trailing edge on the lower surface
+        x_coords = np.concatenate([np.flip(xu), xl[1:]])
+        y_coords = np.concatenate([np.flip(yu), yl[1:]])
+
+        return np.column_stack((x_coords, y_coords))
+
+    @staticmethod
+    def offset_airfoil(outer_aerofoil_coords, panel_thickness):
+        """
+        Offset airfoil coordinates inward by a specified distance.
+
+        Parameters:
+            airfoil_coords (numpy.ndarray): Array of [x, y] coordinates of the airfoil
+            offset_distance (float): Distance to offset points inward
+
+        Returns:
+            numpy.ndarray: Offset airfoil coordinates
+        """
+
+        # Initialising arrays
+        # n_points = len(outer_aerofoil_coords)
+        mid_aerofoil_coords = np.zeros_like(outer_aerofoil_coords)
+        inner_aerofoil_coords = np.zeros_like(outer_aerofoil_coords)
+
+        # Find the leading edge (minimum x-coordinate)
+        le_idx = np.argmin(np.linalg.norm(outer_aerofoil_coords, axis=1))
+
+        # Calculating normal at each point
+        normals = GeoOps.normals_2D(outer_aerofoil_coords)
+
+        # Offsetting using the normals and distances
+        mid_aerofoil_coords = outer_aerofoil_coords + panel_thickness / 2 * normals
+        inner_aerofoil_coords = outer_aerofoil_coords + panel_thickness * normals
+
+        # Finding contact point of inner aerofoil
+        contact_point, indexes = GeoOps.intersection_point(
+            inner_aerofoil_coords[:le_idx], inner_aerofoil_coords[le_idx:]
+        )
+
+        # finding normal vector from contact point to outer aerofoils
+        # normal for upper section of aerofoil
+        upper_normal = GeoOps.normals_2D(
+            np.vstack(
+            [
+                    inner_aerofoil_coords[indexes[0]],
+                    contact_point,
+                    inner_aerofoil_coords[indexes[0] + 1],
+                ]
+            )
+        )[1]
+
+        upper_normal_line = np.array(
+            [contact_point, contact_point - upper_normal * panel_thickness]
+        )
+        # normal for lower section of aerfoil
+        lower_normal = GeoOps.normals_2D(
+            np.vstack(
+                [
+                    inner_aerofoil_coords[indexes[1] + le_idx],
+                    contact_point,
+                    inner_aerofoil_coords[indexes[1] + le_idx + 1],
+                ]
+            )
+        )[1]
+        lower_normal_line = np.array(
+            [contact_point, contact_point - lower_normal * panel_thickness]
+        )
+
+        # Trimming the inner aerofoil
+        inner_aerofoil_coords = np.vstack(
+            [
+                contact_point,
+                inner_aerofoil_coords[indexes[0] + 1 : indexes[1] + le_idx + 1],
+                contact_point,
+            ]
+        )
+
+        # Trimming mid aerofoil
+        top_intersection_point, top_indexes = GeoOps.intersection_point(
+            mid_aerofoil_coords[:le_idx], upper_normal_line
+        )
+        bottom_intersection_point, bottom_indexes = GeoOps.intersection_point(
+            mid_aerofoil_coords[le_idx:], lower_normal_line
+        )
+        mid_aerofoil_coords = np.vstack(
+            [
+                top_intersection_point,
+                mid_aerofoil_coords[
+                    top_indexes[0] + 1 : bottom_indexes[0] + le_idx + 1
+                ],
+                bottom_intersection_point,
+            ]
+        )
+
+        # Trimming outer aerofoil
+        top_intersection_point, top_indexes = GeoOps.intersection_point(
+            outer_aerofoil_coords[:le_idx], upper_normal_line
+        )
+        bottom_intersection_point, bottom_indexes = GeoOps.intersection_point(
+            outer_aerofoil_coords[le_idx:], lower_normal_line
+        )
+        outer_aerofoil_coords = np.vstack(
+            [
+                top_intersection_point,
+                outer_aerofoil_coords[
+                    top_indexes[0] + 1 : bottom_indexes[0] + le_idx + 1
+                ],
+                bottom_intersection_point,
+            ]
+        )
+
+        return {
+            "inner": inner_aerofoil_coords,
+            "mid": mid_aerofoil_coords,
+            "outer": outer_aerofoil_coords
+        }
+
+    @staticmethod
+    def edge_pairs(element_nodes):
+        """
+        Takes in a 2D array of element connectivity and returns two arrays:
+        1. signed_indices: A 3D array of orientation sign and index of each node-wise edge in the unique_sorted_edge_array.
+        2. unique_sorted_edges: A 2D array of unique sorted edges.
+
+        Parameters:
+            element_nodes (numpy.ndarray): 2D array where each row represents an element defined by node numbers. Minimum of 3 nodes required.
+        """
+
+        if not isinstance(element_nodes, np.ndarray) or element_nodes.ndim != 2 and element_nodes.shape[1]>=3 and element_nodes.dtype in [int, np.int32, np.int64]:
+            raise ValueError(
+                f"Input element_nodes must be a 2D numpy array of integers with atleast 3 nodes in the row. Received {element_nodes.shape}"
+            )
+
+        # create edge list
+        shape = element_nodes.shape
+        rolled_element_nodes = np.roll(element_nodes, shift=-1, axis=1) # -1 shift to shift left
+        edges = np.empty((shape[0], shape[1], 2), dtype=element_nodes.dtype)
+        edges[:, :, 0] = element_nodes
+        edges[:, :, 1] = rolled_element_nodes
+
+        # find unique edges
+        edge_array = edges.reshape(-1, 2)
+        sorted_edge_array = np.sort(edge_array, axis=1)
+        # Retain order of first appearance in unique array
+        _, index = np.unique(sorted_edge_array, axis=0, return_index=True)
+        unique_sorted_edge_array = sorted_edge_array[np.sort(index)]
+
+        # create signed edge labels
+        sign = np.where(np.all(edge_array == sorted_edge_array, axis=1), 1, -1)
+        signed_indices = np.empty((edge_array.shape[0], 2), dtype=int)
+        signed_indices[:, 0] = sign
+        # For each row in sorted_edge_array, find its index in unique_sorted_edges along axis 0
+        idx_in_unique = np.array([np.argwhere((unique_sorted_edge_array == row).all(axis=1))[0][0] for row in sorted_edge_array])
+        signed_indices[:, 1] = idx_in_unique
+
+        # Reshape to element
+        signed_indices = signed_indices.reshape(shape[0], shape[1], 2)
+
+        return signed_indices, unique_sorted_edge_array
+
+class Units:
+    """
+    A class providing unit conversion methods.
+    """
+
+    @staticmethod
+    def m2mm(value: float) -> float:
+        """
+        Converts a value from meters to millimeters.
+
+        Parameters:
+            value (float): The value in meters to be converted.
+
+        Returns:
+            float: The equivalent value in millimeters.
+        """
+        return value * 1000.0
+
+    @staticmethod
+    def mm2m(value: float) -> float:
+        """
+        Converts a value from millimeters to meters.
+
+        Parameters:
+            value (float): The value in millimeters to be converted.
+
+        Returns:
+            float: The converted value in meters.
+        """
+        return value / 1000.0
+
+    @staticmethod
+    def deg2rad(value: float) -> float:
+        """
+        Converts an angle from degrees to radians.
+
+        Parameters:
+            value (float): Angle in degrees.
+
+        Returns:
+            float: Angle in radians.
+        """
+        return np.deg2rad(value)
+
+    @staticmethod
+    def rad2deg(value: float) -> float:
+        """
+        Converts an angle from radians to degrees.
+
+        Parameters:
+            value (float): Angle in radians.
+
+        Returns:
+            float: Angle converted to degrees.
+        """
+        return np.rad2deg(value)
+
+class Directory:
+    def __init__(self, case_name: str = "default_case"):
+        self.case_name = case_name
+        self.run_folder = os.path.abspath(os.getcwd())
+        self.case_folder = os.path.join(self.run_folder, case_name)
+        self.abaqus_folder = os.path.join(self.run_folder, "abaqus_temp")
+        for folder in [self.case_folder, self.abaqus_folder]:
+            os.makedirs(folder, exist_ok=True)
+        for sub in [
+            "mesh",
+            "input",
+            "inp",
+            "msg",
+            "dat",
+            "odb",
+            "report",
+            "data",
+            "fig",
+            "log",
+            "trace",
+            "sta",
+            "temp",
+        ]:
+            os.makedirs(os.path.join(self.case_folder, sub), exist_ok=True)
+        for sub in ["inp", "data"]:
+            os.makedirs(
+                os.path.join(self.case_folder, sub, "serialised"), exist_ok=True
+            )
+
+class Plots:
+
+    @staticmethod
+    def node_coupling(master_coords, slave_coords, xlabel="", ylabel="", save_path=None, show=False):
+        """
+        For each pair of master and slave coordinates, draws a line connecting them,
+        and scatters the master and slave nodes with different colors. The plot is saved
+        to a file in the specified case folder.
+        Parameters:
+            master_coords (np.ndarray): Array of shape (N, 2) containing coordinates of master nodes.
+            slave_coords (np.ndarray): Array of shape (N, 2) containing coordinates of slave nodes.
+            xlabel (str, optional): Label for the x-axis. Default is an empty string.
+            ylabel (str, optional): Label for the y-axis. Default is an empty string.
+            save_path (str, optional): Path to save the figure. If None, figure is not saved.
+            show (bool, optional): Whether to display the plot. Default is False.
+        """
+        plt.figure(figsize=(8, 6))
+        for m, s in zip(master_coords, slave_coords):
+            plt.plot([m[0], s[0]], [m[1], s[1]], 'k-', lw=1)
+        plt.scatter(master_coords[:, 0], master_coords[:, 1], color='blue', label='Master nodes')
+        plt.scatter(slave_coords[:, 0], slave_coords[:, 1], color='red', label='Slave nodes')
+        plt.xlabel(f'{xlabel}')
+        plt.ylabel(f'{ylabel}')
+        plt.title('Kinematic Coupling Node Pairs')
+        plt.legend()
+        plt.axis('equal')
+        plt.grid(True, linestyle='--', alpha=0.5)
+        # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def aerofoils(aerofoils, save_path=None, show=False):
+        """
+        Plots multiple aerofoils on the same graph.
+        Parameters:
+            aerofoils (list or dict): A list or dictionary of aerofoil coordinates.
+                          Each item should be a 2D array with shape (n, 2) where n is the number of points.
+            save_path (str, optional): Path to save the figure. If None, figure is not saved.
+            show (bool, optional): Whether to display the plot. Default is False.
+        """
+
+        plt.figure(figsize=(10, 6))
+
+        # Check if input is a list or dictionary
+        if isinstance(aerofoils, list):
+            for i, coords in enumerate(aerofoils):
+                plt.plot(coords[:, 0], coords[:, 1], label=f"Aerofoil {i}")
+        elif isinstance(aerofoils, dict):
+            for name, coords in aerofoils.items():
+                plt.plot(coords[:, 0], coords[:, 1], label=str(name))
+        else:
+            raise TypeError(
+                "Input must be a list or dictionary of aerofoil coordinates"
+            )
+
+        # Format the plot
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.grid(True, linestyle="--", alpha=0.7)
+        plt.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.05),
+            ncol=len(aerofoils) if isinstance(aerofoils, list) else len(aerofoils.keys()),
+            frameon=False,
+        )
+        plt.gca().set_aspect("equal")
+
+        # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def fairing_response(FairingResponse, save_path=None, show=False):
+        """
+        Plots the fairing response for a given dataset.
+
+        Parameters:
+            FairingResponse (dict or list): The fairing response data to plot.
+            save_path (str, optional): Path to save the figure. If None, figure is not saved.
+            show (bool, optional): Whether to display the plot. Default is False.
+        """
+        fig, ax1 = plt.subplots(figsize=(3, 3))
+        num_colours = len(FairingResponse) if isinstance(FairingResponse, (list, tuple)) else 1
+        colourmap = plt.get_cmap('rainbow', num_colours)
+        colours = list(colourmap(i) for i in range(num_colours))
+
+        for i, data in enumerate([FairingResponse]):
+            rotation = data["Rotation"]
+            torque = data["Torque"]
+            distortion = Units.m2mm(data["Distortion"])
+
+
+            ax1.plot(rotation, torque, color=colours[i], linestyle='-', label="Torque")
+            ax1.set_xlabel("Rotation [deg]")
+            ax1.set_ylabel("Torque [Nm] (solid)")
+
+            ax2 = ax1.twinx()
+            ax2.plot(rotation, distortion, color=colours[i], linestyle='--', label="Distortion")
+            ax2.set_ylabel("Distortion [mm] (dashed)")
+
+            # Save the figure if requested
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+            if show:
+                plt.show()
+            else:
+                plt.close()
+
+    @staticmethod
+    def grid(coords_labels, save_path=None, show=False):
+
+        coords = coords_labels["coords"]
+        labels = coords_labels["labels"]
+
+        # dimensions
+        space_dim = coords[0,0,:].shape[0]
+
+        fig = plt.figure(figsize=(20, 16))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Plot the grid lines (chordwise and spanwise)
+        for i in range(coords.shape[0]):
+            ax.plot(*(coords[i, :, axis] for axis in range(space_dim)),
+                    color='g', marker='o', markersize=1, linewidth=0.5)
+        for j in range(coords.shape[1]):
+            ax.plot(*(coords[:, j, axis] for axis in range(space_dim)),
+                    color='r', marker='o', markersize=1, linewidth=0.5)
+
+        # Show element numbers next to centroids
+        for i in range(coords.shape[0]):
+            for j in range(coords.shape[1]):
+                ax.text(
+                    *coords[i, j, :],
+                    f"{labels[i, j]}, ({i},{j})",
+                    fontsize=2,
+                    color='k'
+                )
+
+        plt.gca().set_aspect("equal")
+        plt.tight_layout()
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        if space_dim == 3:
+            ax.set_zlabel('Z [m]')
+        ax.set_title('Element Centroid Grid in 3D')
+
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def grid_split(coords_labels, save_path=None, show=False):
+
+        try:
+            coords = coords_labels["coords"]
+            bool_coords = True
+        except:
+            bool_coords = False
+
+        try:
+            labels = coords_labels["labels"]
+            bool_label = True
+        except:
+            bool_label = False
+
+        try:
+            border = coords_labels["border"]
+            bool_border = True
+        except:
+            bool_border = False
+
+        try:
+            vectors_coord = coords_labels["vectors_coords"]
+            vectors_SE = coords_labels["vectors_SE"]
+            bool_quiver_SE = True
+        except:
+            bool_quiver_SE = False
+
+        try:
+            vectors_coord = coords_labels["vectors_coords"]
+            vectors_SK = coords_labels["vectors_SK"]
+            bool_quiver_SK = True
+        except:
+            bool_quiver_SK = False
+
+        try:
+            lines = coords_labels["lines"]
+            bool_lines = True
+        except:
+            bool_lines = False
+
+
+        fig, ax=plt.subplots(2)
+
+        # Find min and max for each coordinate axis (axis=2)
+        mins = coords.min(axis=(0, 1))
+        maxs = coords.max(axis=(0, 1))
+        diff = (maxs - mins).min()
+        padding = 0.1 * diff  # 10% padding on each side
+        mins -= padding
+        maxs += padding
+
+        # Plot the grid lines (chordwise and spanwise)
+        for i_ax, _ in enumerate(ax):
+
+            ax[i_ax].set_xlabel('$\\eta$ [m]')
+            ax[i_ax].set_ylabel('$\\zeta$ [m]')
+            x_min = [0, mins[0]][i_ax]
+            x_max = [maxs[0], 0][i_ax]
+            y_min, y_max = mins[1], maxs[1]
+            ax[i_ax].set_xlim([x_min, x_max])
+            ax[i_ax].set_ylim([y_min, y_max])
+            ax[i_ax].set_aspect("equal")
+
+            # mask
+            mask = np.logical_and.reduce((
+                coords[:, :, 0] >= x_min,
+                coords[:, :, 0] <= x_max,
+                coords[:, :, 1] >= y_min,
+                coords[:, :, 1] <= y_max
+            ))
+
+            if bool_coords:
+                # Plot the grid lines (chordwise and spanwise)
+                for i in range(coords.shape[0]):
+                    ax[i_ax].plot(*(coords[i, :, axis] for axis in range(2)),
+                        color='gray', marker='.', markersize=0.15, linewidth=0.15, alpha=0.25,
+                        label = None)
+                for j in range(coords.shape[1]):
+                    ax[i_ax].plot(*(coords[:, j, axis] for axis in range(2)),
+                        color='gray', marker='.', markersize=0.15, linewidth=0.15, alpha=0.25,
+                        label = None)
+
+            if bool_quiver_SE:
+                # Plot vectors at each grid point
+                ax[i_ax].quiver(
+                    *(vectors_coord[..., axis].ravel() for axis in range(2)),
+                    *(vectors_SE[...,0, axis].ravel() for axis in range(2)),
+                    color='green',
+                    angles='xy', width=0.001, scale_units='xy', scale=75,
+                    label="PS1"
+                )
+                ax[i_ax].quiver(
+                    *(vectors_coord[..., axis].ravel() for axis in range(2)),
+                    *(vectors_SE[..., 1, axis].ravel() for axis in range(2)),
+                    color='magenta',
+                    angles='xy', width=0.001, scale_units='xy', scale=75,
+                    label="PS2"
+                )
+
+            if bool_quiver_SK:
+                # curvature
+                ax[i_ax].quiver(
+                    *(vectors_coord[..., axis].ravel() for axis in range(2)),
+                    *(vectors_SK[...,0, axis].ravel() for axis in range(2)),
+                    color='orange',
+                    angles='xy', width=0.001, scale_units='xy', scale=75,
+                    label="PK1"
+                )
+                ax[i_ax].quiver(
+                    *(vectors_coord[..., axis].ravel() for axis in range(2)),
+                    *(vectors_SK[..., 1, axis].ravel() for axis in range(2)),
+                    color='pink',
+                    angles='xy', width=0.001, scale_units='xy', scale=75,
+                    label="PK2"
+                )
+
+            # Show element numbers next to where mask is True
+            if bool_label:
+                for i in range(coords.shape[0]):
+                    for j in range(coords.shape[1]):
+                        if mask[i, j]:
+                            position = coords[i, j]
+                            label = f"{i},{j}"#{labels[i, j]}"
+                            ax[i_ax].text(
+                                *position,
+                                label,
+                                fontsize=2,
+                                color='k'
+                            )  
+
+            # show borders
+            if bool_border:
+                ax[i_ax].plot(
+                    *(np.r_[border[:, axis], border[0, axis]] for axis in range(2)),
+                    color='black', marker='o', markersize=0.15, linewidth=0.5,
+                    label="Border"
+                )
+
+            if bool_lines:
+                num_groups = len(lines)
+                cmap = plt.get_cmap('rainbow', num_groups)
+                colours = [cmap(i) for i in range(num_groups)]
+                for i, (key, onetype) in enumerate(lines.items()):
+                    for j, oneline in enumerate(onetype):
+                        ax[i_ax].plot(
+                            *(oneline[:, axis] for axis in range(2)),
+                            color=colours[i], marker='o', markersize=0.15, linewidth=0.5,
+                            label=f"{key}" if j==0 else None
+                        )
+
+                        
+
+
+        # Legend
+        handles, labels = ax[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower right', fontsize=9, bbox_to_anchor=(0.95, 0.95), ncol=len(labels), frameon=False)
+
+        fig.tight_layout()
+
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def core_geometry(coords_connectivity, save_path=None, show=False):
+                # Plot coordinates and line connectivity
+        fig, ax = plt.subplots()
+        coords = coords_connectivity["coordinates"]
+        lines = coords_connectivity["line_connectivity"]
+
+        # Plot nodes with labels
+        for key, value in coords.items():
+            ax.plot(value[0], value[1], 'o', color='blue')
+            ax.text(value[0], value[1], str(key), fontsize=9, ha='right', va='bottom')
+
+        # Plot lines
+        for line_set in lines:
+            for a, b in line_set:
+                p1 = coords[str(a)]
+                p2 = coords[str(b)]
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 'k-')
+
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.axis('equal')
+
+        fig.tight_layout()
+
+         # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
