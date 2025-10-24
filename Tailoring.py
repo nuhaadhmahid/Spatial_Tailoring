@@ -511,6 +511,7 @@ class Tracer:
 
         # return points
         return lines
+    
     @staticmethod
     def resample_lines(lines_1, lines_2):
         """
@@ -919,7 +920,9 @@ class Lattice:
 
         # Refine lines
         min_length = 1e-2*self.fairing_chord
-        for key in self.lattice_lines.keys():
+        keys = ["STRINGERS", "CHEVRONS", "RIBS"]
+        assert all(key in self.lattice_lines.keys() for key in keys), "Error: Missing lattice lines for fairing creation."
+        for key in keys:
             self.lattice_lines[key] = self.refine_lines(self.lattice_lines[key], min_length)
 
         # Create 2D mesh for each increment
