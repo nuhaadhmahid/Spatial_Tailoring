@@ -789,7 +789,7 @@ class Tracer:
                     point = line[seg_i] + v1/2 + (mag_v2*norm_v2) #*(-1)**line_i
                     chevron_line.extend([point, line[seg_i+1]])
                 # adding chevron line to the spanwise
-                chevron_line = Utils.GeoOps.bisect_line(np.array(chevron_line))
+                chevron_line = np.array(chevron_line)
                 lines_2[line_i] = chevron_line
 
             # exerting boundary
@@ -1208,7 +1208,7 @@ if __name__ == "__main__":
 
     # Reference for traced field
     reference_case = 0 # reference case for the field data - this must be an equivalent model shell model
-    reference_field = 15 # rotation angle for the folding wingtip at which deformation field is extracted
+    reference_field = 0 # rotation angle for the folding wingtip at which deformation field is extracted
 
     # Tailored Geometry
     tailored = Lattice(directory, case_number, reference_case, reference_field)

@@ -163,7 +163,7 @@ class FairingGeometry:
             )
         )
 
-
+    @Utils.logger
     def generate_mesh(self, bool_show=False):
         """
         Generate the mesh for the fairing using GMSH.
@@ -631,7 +631,7 @@ class FairingGeometry:
                 # Check if all points are created
                 assert np.all(points == geometry["nodes"][:, 0]), "ERROR: Some points were not created. They likely got merged. Increase the tolerance in Tailoring.py"
 
-                # create surface # FIXME: Avoid edge replication
+                #  create elements
                 if geometry["elements"].keys() != {"S3R"}:
                     raise ValueError(f"ERROR: Unsupported element types. Recieved {geometry['elements'].keys()}, expected {{'S3R'}}")
 
@@ -719,9 +719,10 @@ class FairingGeometry:
                 """
                 # Mesh generation
                 gmsh.option.setNumber("Mesh.MeshSizeMax", self.var["element_size"])
+                gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay for 2D
                 MESH.generate(2)
-                MESH.optimize("UntangleMeshGeometry")
-                MESH.optimize("Relocate3D")
+                MESH.optimize("Laplace2D") 
+
 
                 # Printing options
                 gmsh.option.setNumber("Mesh.SaveGroupsOfElements", -100)
@@ -876,13 +877,15 @@ class FairingGeometry:
             # Create geometry
             create_abaqus_geometry()
 
+        print(f"Starting GMSH for {self.directory.case_name} - {self.case_number}")
+
         # Initialize GMSH
         gmsh.initialize()
 
         # Set GMSH options
         eps = np.finfo(np.float32).eps  # machine epsilon
         gmsh.option.setNumber(
-            "General.Verbosity", 2
+            "General.Verbosity", 0
         )  # Reduce verbosity, print error and warnings
 
         # Set GMSH model name
@@ -1321,7 +1324,7 @@ if __name__ == "__main__":
 
     tailored = FairingAnalysis(
         variables={
-            "element_size": 0.010,
+            "element_size": 0.020,
             "solver":"dynamic",
             "model_fidelity": "explicit", # either of ["equivalent", "explicit", "fullscale"]
             "model_fidelity_settings":{
@@ -1339,4 +1342,4 @@ if __name__ == "__main__":
         case_number=1,
     )
     tailored.generate_mesh()
-    tailored.run_abaqus()
+    tailored.run_abaqus(num_core=10)
