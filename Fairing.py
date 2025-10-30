@@ -6,6 +6,7 @@ import traceback
 
 import gmsh
 import numpy as np
+import scipy
 
 import Utils
 import Tailoring
@@ -105,10 +106,7 @@ class FairingGeometry:
             method="json",
         )
 
-    def load_aerofoil(
-        self,
-        aerofoil_database=None,
-    ):
+    def load_aerofoil(self,aerofoil_database=None,num_points=100):
         if aerofoil_database is None:
             aerofoil_database = os.path.join(
                 self.directory.run_folder, "aerofoil_database"
@@ -122,7 +120,7 @@ class FairingGeometry:
                     lines = f.readlines()
 
                 # Try to parse the first line
-                first_line = lines[0].strip().split()
+                first_line = lines[0].strip().split(",")
                 try:
                     # Check if first line contains floats
                     [float(val) for val in first_line]
@@ -133,15 +131,13 @@ class FairingGeometry:
                 # Parse the remaining lines into an array of floats
                 coordinates = []
                 for i in range(start_idx, len(lines)):
-                    line = lines[i].strip().split()
+                    line = lines[i].strip().split(",")
                     if line:  # Skip empty lines
                         try:
                             coords = [float(val) for val in line]
                             coordinates.append(coords)
                         except ValueError:
                             continue
-
-                return np.array(coordinates)
             except Exception:
                 traceback.print_exc()
                 return None
@@ -149,6 +145,32 @@ class FairingGeometry:
             raise ValueError(
                 f"ERROR: Unacceptable value for aerofoil_path={aerofoil_path}"
             )
+
+        # Resample
+        coordinates = np.array(coordinates)
+        # interpolate to required number of points
+        le_idx = np.argmin(np.linalg.norm(coordinates, axis=1))
+        # Generate x-coordinates (cosine spacing for better point distribution)
+        beta = np.linspace(0, np.pi, num_points)
+        x = (1.0 - np.cos(beta)) / 2.0
+        # Interpolate y-coordinates for upper and lower surfaces
+        yu = scipy.interpolate.interp1d(
+            coordinates[: le_idx + 1, 0],
+            coordinates[: le_idx + 1, 1],
+            fill_value="extrapolate"
+        )(x)
+        yl = scipy.interpolate.interp1d(
+            coordinates[le_idx:, 0],
+            coordinates[le_idx:, 1],
+            fill_value="extrapolate"
+        )(x)
+        # Combine upper and lower surfaces
+        x_coords = np.concatenate([np.flip(x), x[1:]])
+        y_coords = np.concatenate([np.flip(yu), yl[1:]])
+        coordinates = np.column_stack((x_coords, y_coords))
+
+        return coordinates
+
 
     def load_mesh_data(self):
         """
@@ -211,7 +233,7 @@ class FairingGeometry:
                     refence_aerofoil_coords = Utils.GeoOps.generate_naca_4digit(naca_code, num_points)
                 else:
                     # Load airfoil from file
-                    refence_aerofoil_coords = self.load_aerofoil()
+                    refence_aerofoil_coords = self.load_aerofoil(num_points=num_points)
 
                 # Scaling cross-section
                 refence_aerofoil_coords *= self.var["fairing_chord"]
@@ -591,7 +613,7 @@ class FairingGeometry:
                     f.write("\n".join(lines))
 
             # Get cross-section shape
-            get_aerofoil_cords(500)
+            get_aerofoil_cords(500, bool_plot=True)
 
             # Create shell geometry
             create_shell_geometry()
@@ -1019,6 +1041,7 @@ class FairingAnalysis(FairingGeometry):
         ) as f:
             f.write("\n".join(lines))
 
+    @Utils.logger
     def run_abaqus(
         self, abaqus_path: str = "C:\\SIMULIA\\Commands\\abaqus", num_core: int = 4
     ):
@@ -1299,12 +1322,12 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_9")
+    directory = Utils.Directory(case_name="test_case_10")
 
     # # RVE
     # RVE = RVE(
     #     variables={
-    #         "chevron_wall_length": Utils.Units.mm2m(80.0)
+    #         "chevron_wall_length": Utils.Units.mm2m(80.0),
     #     },
     #     directory=directory,
     #     case_number=0
@@ -1313,18 +1336,29 @@ if __name__ == "__main__":
 
     # # Fairing definition
     # fairing = FairingAnalysis(
+    #     variables={
+    #         "aerofoil_name": "rae2822",
+    #         "rotation_angle": Utils.Units.deg2rad(40.0),
+    #         "solver":"dynamic",
+    #         "model_fidelity_settings":{
+    #             "equivalent":{
+    #                 "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
+    #             }
+    #         },
+    #     },  
     #     directory=directory,
     #     case_number=0,
     #     RVE_identifier=0
     # )
     # fairing.analysis()
-    # # fairing.post_process_results()
+    # fairing.post_process_results()
 
     # # TODO: Add the lattice generation and analysis for explicit model
 
     tailored = FairingAnalysis(
         variables={
-            "element_size": 0.020,
+            "element_size": 0.010,
+            "rotation_angle": Utils.Units.deg2rad(40.0),
             "solver":"dynamic",
             "model_fidelity": "explicit", # either of ["equivalent", "explicit", "fullscale"]
             "model_fidelity_settings":{

@@ -349,7 +349,7 @@ class Mesh (Nodes, Elements):
 
         return incorporated_indices
 
-    def triangulate(self, el_list_idx: int, node_indexes: np.ndarray) -> None:
+    def triangulate(self, el_list_idx: int, node_indexes: np.ndarray, nsets_to_remove:dict|None = None) -> None:
         """
         Performs Delaunay triangulation on a subset of nodes specified by their indexes
         """
@@ -362,6 +362,23 @@ class Mesh (Nodes, Elements):
         # Perform Delaunay triangulation
         tri = Delaunay(self.nodes[node_indexes])  # Triangulate using specified positions
         triangles = np.asarray([node_indexes[sub_indexes] for sub_indexes in tri.simplices], dtype=int)
+
+        # Remove triangles where all nodes are in the same nset
+        if nsets_to_remove is not None:
+            to_remove = []
+            for nset_name in nsets_to_remove.keys():
+                nset_nodes = nsets_to_remove[nset_name]
+                # Check if all nodes of each triangle are in the current nset
+                # isin returns boolean array, all with axis=1 checks if all nodes in triangle are in nset
+                mask = np.all(np.isin(triangles, nset_nodes), axis=1)
+                if np.any(mask):
+                    print(f"\t WARNING: Removing {np.sum(mask)} triangles with all nodes in nset '{nset_name}'")
+                to_remove.extend(np.where(mask)[0])
+            
+            # Remove duplicates and convert to array, then filter triangles
+            if to_remove:
+                to_remove = np.unique(to_remove)
+                triangles = np.delete(triangles, to_remove, axis=0)
 
         # Add triangles to the mesh
         self.add_elements(el_list_idx, triangles, elset_name="triangles")

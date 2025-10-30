@@ -797,11 +797,16 @@ class Tracer:
             chordwise, spanwise, ribs, trailing_edge = Tracer.exert_boundary(lines_1, lines_2, self.border_nodes_2D)
 
             # merging the two trailing egdes
-            trailing_edge_y = np.sort(np.concatenate(tuple(edge[:,1].astype(np.float32) for edge in trailing_edge), axis=0, dtype=np.float32))
+            trailing_edge_y = np.sort(
+                np.unique(
+                    np.concatenate(tuple(edge[:,1].astype(np.float32) for edge in trailing_edge), axis=0, dtype=np.float32)
+                )
+            )
+            trailing_edge_x = list(np.mean(edge[:,0].astype(np.float32)) for edge in trailing_edge)
             for i in range(trailing_edge.shape[0]):
                 # merging the trailing edge
-                trailing_edge[i] = np.column_stack((
-                    np.ones(trailing_edge_y.shape)*trailing_edge[i][0,0],
+                trailing_edge[i] =  np.column_stack((
+                    np.repeat(trailing_edge_x[i],trailing_edge_y.shape),
                     trailing_edge_y
                 ))
     
@@ -945,7 +950,9 @@ class Lattice:
             )
 
         # Triangulate
-        self.mesh2D.triangulate(1, np.arange(self.mesh2D.nodes.shape[0]))
+        # Remove triangles with all three nodes on the border
+        edge_nsets = {name: self.mesh2D.nsets()[name] for name in ['RIBS', 'TE_TOP', 'TE_BOTTOM']}
+        self.mesh2D.triangulate(1, np.arange(self.mesh2D.nodes.shape[0]), edge_nsets)
 
         if bool_plot:
             print(f"Plotting: rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_2D: nodes {self.mesh2D.nodes.shape}, elements {self.mesh2D.elements[1].shape}")
@@ -1202,7 +1209,7 @@ class Lattice:
 
 if __name__ == "__main__":
     # Example
-    directory = Utils.Directory(case_name="test_case_9")
+    directory = Utils.Directory(case_name="test_case_10")
     case_number = 1 # current case number
 
     # Trace Lattice

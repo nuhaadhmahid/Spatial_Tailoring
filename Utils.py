@@ -66,6 +66,7 @@ def unique_1D(A):
 def run_subprocess(command, run_folder, log_file):
     """Runs a shell command and captures its output."""
     try:
+        print(f"Starting process with PID: {os.getpid()}")
         process = subprocess.run(
             command,
             shell=True,
@@ -308,12 +309,19 @@ class GeoOps:
             # findingg the closest indexes
             matrix = line_1[:, None]-line_2[None, :]
             dist_squared_matrix = np.sum(np.power(matrix,2), axis=2)
-            index = np.unravel_index(np.argmin(dist_squared_matrix),dist_squared_matrix.shape)
+            # sorted list of distances
+            sorted_indices = np.argsort(dist_squared_matrix.reshape(-1)) # if required to loop
+            indices = np.c_[*np.unravel_index(sorted_indices,dist_squared_matrix.shape)]
+            # Single minimum distance
+            # min_index = np.argmin(dist_squared_matrix)
+            # indices = [np.unravel_index(sorted_indices,dist_squared_matrix.shape)]
 
-            # using line segements to find intersection points
-            for i in range(max([0,index[0]-1]), min([index[0]+1, line_1.shape[0]-1])): # index for line 1
-                for j in range(max([0,index[1]-1]), min([index[1]+1, line_2.shape[0]-1])): # index for line 2
-                    try:
+            # checking line segments around the closest points
+            num_indices = indices.shape[0]
+            for count, index in enumerate(indices):
+                # using line segements to find intersection points
+                for i in range(max([0,index[0]-1]), min([index[0]+1, line_1.shape[0]-1])): # index for line 1
+                    for j in range(max([0,index[1]-1]), min([index[1]+1, line_2.shape[0]-1])): # index for line 2
                         # parametrise the line segment with range 0 to 1
                         # https://en.wikipedia.org/wiki/Line%E2%80%93line_intersection
                         x1, y1 = line_1[i, 0], line_1[i, 1]
@@ -328,14 +336,13 @@ class GeoOps:
                         if all([t1>=0.0, t1<=1.0, t2>=0.0, t2<=1.0]):
                             # found intersection
                             return np.array([x1+t1*(x2-x1), y1+t1*(y2-y1)]), np.array([i,j])
-                        
-                        # just for debugging
-                        # print(t1, t2, (x1,y1), (x2,y2), (x3,y3), (x4,y4))
 
-                    except:
-                        #pass
-                        traceback.print_exc()
+                        # # just for debugging
+                        # print(t1, t2, (x1,y1), (x2,y2), (x3,y3), (x4,y4), "\n")
 
+                # limit search to first 10 points or 10 percentile closest points
+                if count >= max(10, int(0.1*num_indices)):
+                    break
 
             # no intersection
             return np.array([np.nan, np.nan]), np.array([np.nan, np.nan])
@@ -488,6 +495,8 @@ class GeoOps:
 
         # Find the leading edge (minimum x-coordinate)
         le_idx = np.argmin(np.linalg.norm(outer_aerofoil_coords, axis=1))
+        top_idx = np.argmax(outer_aerofoil_coords[:, 1])
+        bottom_idx = np.argmin(outer_aerofoil_coords[:, 1])
 
         # Calculating normal at each point
         normals = GeoOps.normals_2D(outer_aerofoil_coords)
@@ -498,7 +507,7 @@ class GeoOps:
 
         # Finding contact point of inner aerofoil
         contact_point, indexes = GeoOps.intersection_point(
-            inner_aerofoil_coords[:le_idx], inner_aerofoil_coords[le_idx:]
+            inner_aerofoil_coords[:top_idx], inner_aerofoil_coords[bottom_idx:]
         )
 
         # finding normal vector from contact point to outer aerofoils
@@ -513,28 +522,29 @@ class GeoOps:
             )
         )[1]
 
+        buffer = 1.5
         upper_normal_line = np.array(
-            [contact_point, contact_point - upper_normal * panel_thickness]
+            [contact_point, contact_point - upper_normal * panel_thickness * buffer]
         )
         # normal for lower section of aerfoil
         lower_normal = GeoOps.normals_2D(
             np.vstack(
                 [
-                    inner_aerofoil_coords[indexes[1] + le_idx],
+                    inner_aerofoil_coords[indexes[1] + bottom_idx],
                     contact_point,
-                    inner_aerofoil_coords[indexes[1] + le_idx + 1],
+                    inner_aerofoil_coords[indexes[1] + bottom_idx + 1],
                 ]
             )
         )[1]
         lower_normal_line = np.array(
-            [contact_point, contact_point - lower_normal * panel_thickness]
+            [contact_point, contact_point - lower_normal * panel_thickness * buffer]
         )
 
         # Trimming the inner aerofoil
         inner_aerofoil_coords = np.vstack(
             [
                 contact_point,
-                inner_aerofoil_coords[indexes[0] + 1 : indexes[1] + le_idx + 1],
+                inner_aerofoil_coords[indexes[0] + 1 : indexes[1] + bottom_idx + 1],
                 contact_point,
             ]
         )
@@ -563,6 +573,7 @@ class GeoOps:
         bottom_intersection_point, bottom_indexes = GeoOps.intersection_point(
             outer_aerofoil_coords[le_idx:], lower_normal_line
         )
+
         outer_aerofoil_coords = np.vstack(
             [
                 top_intersection_point,

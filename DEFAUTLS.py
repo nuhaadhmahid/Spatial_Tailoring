@@ -31,7 +31,7 @@ FAIRING_DEFAULTS = {
     "model_fidelity": "equivalent", # either of ["equivalent", "explicit", "fullscale"]
     "model_fidelity_settings":{
         "equivalent":{
-            "bool_isotropic": True, # [True, False], if true core properites use, else equivalent panel properties
+            "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
         },
         "explicit":{
             "reference_case": 0, # int, case number of the reference case from which the explicit model is generated
