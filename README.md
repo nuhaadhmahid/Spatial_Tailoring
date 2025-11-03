@@ -6,6 +6,6 @@ The process is shown below:
 
 <img src="images/process.png" alt="process" width="500"/>
 
-As for why do this? It give significant improvement in performance for the morphing fairing as shown below:
+As for why do this? It gives significant improvement in performance for the morphing fairing as shown below:
 
 <img src="images/results.png" alt="result" width="500"/>

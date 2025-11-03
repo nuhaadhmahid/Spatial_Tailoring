@@ -1375,5 +1375,7 @@ if __name__ == "__main__":
         directory=directory,
         case_number=1,
     )
-    tailored.generate_mesh()
-    tailored.run_abaqus(num_core=10)
+    # tailored.generate_mesh()
+    # tailored.run_abaqus(num_core=10)
+    # tailored.extract_fairing_data()
+    tailored.post_process_results()

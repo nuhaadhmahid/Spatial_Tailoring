@@ -1,6 +1,4 @@
 # Tailoring.py
-from numpy.char import capitalize
-from numpy.strings import lower
 import Utils
 from Utils import FairingData
 from Mesh import Mesh
