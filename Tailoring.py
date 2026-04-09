@@ -147,6 +147,7 @@ class Tracer:
         self.nodes_grid_2D = np.zeros(*np.c_[*self.node_index_grid.shape, 2], dtype=np.float32)
 
         # Moving origin to leading edge
+        print("Shape of node grid:", self.node_index_grid.shape)
         FE_j_index = np.linalg.norm(self.surface_nodes_coords[self.node_index_grid][0, :], axis=1).argmin()
 
         # Cumulative sum of differences up to each index (along axis 0, span)
@@ -1112,34 +1113,6 @@ class Lattice:
                 show=False
             )
 
-    # NOTE: Currently not in use
-    # def validate_midplane_mesh(self):
-
-    #     for increment_key in self.mesh3D.keys():
-    #         # check mesh
-    #         degenerates = self.mesh3D.check_mesh_integrity()
-    #         if degenerates['unused_nodes'].size > 0:
-    #             print("Unused nodes:")
-    #             print(self.mesh3D.nodes[degenerates['unused_nodes']])
-    #         if degenerates['degenerate_beams'].size > 0:
-    #             self.mesh3D.remove_beams(degenerates['degenerate_beams'])
-    #         if degenerates['degenerate_triangles'].size > 0:
-    #             print(self.mesh3D.triangles[degenerates['degenerate_triangles']])
-    #         if degenerates['missing_beam_edges_in_triangles'].size > 0:
-    #             print(f"WARNING: {degenerates['missing_beam_edges_in_triangles'].size} beam edges missing in triangles:")
-    #         degenerates = self.mesh3D.check_mesh_integrity()
-    #         if degenerates['unused_nodes'].size > 0 and degenerates['degenerate_beams'].size > 0 and degenerates['degenerate_triangles'].size > 0 and degenerates['missing_beam_edges_in_triangles'].size > 0:
-    #             raise ValueError("Mesh integrity check failed, degenerates found.")
-
-    #         # check repeated sets
-    #         beam_sets = ["TE_top", "TE_bottom", "Ribs","Chevrons","Stringers"]
-    #         for i, key_i in enumerate(beam_sets):
-    #             for j, key_j in enumerate(beam_sets[i+1:]):
-    #                 repeat_index = np.isin(self.mesh3D.beam_sets[key_j], self.mesh3D.beam_sets[key_i])
-    #                 if np.any(repeat_index):
-    #                     print(f"WARNING: Beams of '{key_i}' repeated in '{key_j}' are removed from '{key_j}'.")
-    #                     self.mesh3D.beam_sets[key_j] = self.mesh3D.beam_sets[key_j][~repeat_index]
-
     def write_mesh(self):
         """
         Writes the mesh to a file using the specified serialization method.
@@ -1207,7 +1180,7 @@ class Lattice:
 
 if __name__ == "__main__":
     # Example
-    directory = Utils.Directory(case_name="test_case_10")
+    directory = Utils.Directory(case_name="test_case_12")
     case_number = 1 # current case number
 
     # Trace Lattice
