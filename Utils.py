@@ -5,6 +5,7 @@ import pickle
 import json
 import numpy as np
 import subprocess
+import re
 import matplotlib.pyplot as plt
 
 
@@ -66,7 +67,7 @@ def unique_1D(A):
 def run_subprocess(command, run_folder, log_file):
     """Runs a shell command and captures its output."""
     try:
-        print(f"Starting process with PID: {os.getpid()}")
+        start_time = time.time()
         process = subprocess.run(
             command,
             shell=True,
@@ -76,21 +77,28 @@ def run_subprocess(command, run_folder, log_file):
             text=True,
             capture_output=True,
         )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
         with open(log_file, "a") as log:
-            log.write(f"--- LOG TIME : {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log.write(f"\n***** LOG TIME : {time.strftime('%Y-%m-%d %H:%M:%S')} *****\n")
+            log.write(f"--- ELAPSED TIME : {elapsed_time:.2f} seconds\n")
             log.write(f"--- COMMAND : {command}\n")
-            log.write(f"--- STDOUT ---\n{process.stdout}")
-            log.write(f"--- STDERR ---\n{process.stderr}")
+            log.write(f"--- STDOUT ---\n{process.stdout}\n") if process.stdout else None
+            log.write(f"--- STDERR ---\n{process.stderr}\n") if process.stderr else None
     except subprocess.CalledProcessError as e:
         print(f"ERROR: Execution failed for command:\n{command}.")
-        print(f"Return code: {e.returncode}")
-        print(f"--- STDOUT ---\n{e.stdout}")
-        print(f"--- STDERR ---\n{e.stderr}")
+        print(f"--- RETURN CODE ---\n{e.returncode}") if e.returncode else None
+        print(f"--- STDOUT ---\n{e.stdout}") if e.stdout else None
+        print(f"--- STDERR ---\n{e.stderr}") if e.stderr else None
         with open(log_file, "a") as log:
-            log.write(f"ERROR: Execution failed for command:\n{command}.\n")
-            log.write(f"Return code: {e.returncode}\n")
-            log.write(f"--- STDOUT ---\n{e.stdout}\n")
-            log.write(f"--- STDERR ---\n{e.stderr}\n")
+            log.write(f"\n***** LOG TIME : {time.strftime('%Y-%m-%d %H:%M:%S')} *****\n")
+            log.write(f"--- ELAPSED TIME : {elapsed_time:.2f} seconds\n")
+            log.write(f"--- ERROR : Execution failed after {elapsed_time:.2f} seconds\n")
+            log.write(f"--- COMMAND : {command}\n")
+            log.write(f"--- RETURN CODE : {e.returncode}\n")
+            log.write(f"--- STDOUT ---\n{e.stdout}\n") if e.stdout else None
+            log.write(f"--- STDERR ---\n{e.stderr}\n") if e.stderr else None    
+
 
 class FairingData:
 
@@ -172,18 +180,27 @@ class ReadWriteOps:
             lines = file.read().splitlines()
 
         # number of items for each element
-        def num_element_data(type_label):
+        def element_identification(type_label):
             """
-            Return number of element items (i.e., label + number of nodes) for solid, shell and beam element using GMSH element types.
+            Return number of element items (i.e., label + number of nodes) for solid, shell and beam element using GMSH element types, and the converted Abaqus type label.
             """
-            if type_label.startswith("C3D"): # solid element
-                return int(type_label.strip("C3D")) + 1
-            elif type_label.startswith("CPS"): # shell element
-                return int(type_label.strip("CPS")) + 1
-            elif type_label.startswith("T3D"): # beam element
-                return int(type_label.strip("T3D")) + 1
-            else:
-                raise ValueError(f"Unknown element type: {type_label}")
+            for prefix in ["C3D"]:
+                if type_label.startswith(prefix):
+                    match = re.search(r'\d+', type_label[len(prefix):])
+                    if match: 
+                        return int(match.group()) + 1, f"C3D{int(match.group())}"
+            for prefix in ["CPS", "S"]:
+                if type_label.startswith(prefix):
+                    match = re.search(r'\d+', type_label[len(prefix):])
+                    if match: 
+                        return int(match.group()) + 1, f"S{int(match.group())}R"
+            for prefix in ["T3D"]:
+                if type_label.startswith(prefix):
+                    match = re.search(r'\d+', type_label[len(prefix):])
+                    if match: 
+                        return int(match.group()) + 1, f"B3{int(match.group())-1}"
+            
+            raise ValueError(f"Unknown element type: {type_label}")
 
         # reach mesh content
         temp_list = []
@@ -195,7 +212,7 @@ class ReadWriteOps:
             elif line.startswith("*ELEMENT"):
                 section = "elements"
                 current_type = line.strip().split(",")[1].split("=")[1]
-                num_items_per_element = num_element_data(current_type)
+                num_items_per_element, current_type = element_identification(current_type)
                 if current_type not in mesh_data["elements"]:
                     mesh_data["elements"][current_type] = []
             elif line.startswith("*ELSET"):
@@ -225,13 +242,6 @@ class ReadWriteOps:
                     mesh_data["elsets"][current_set].extend(map(int, items))
                 elif section == "nsets":
                     mesh_data["nsets"][current_set].extend(map(int, items))
-
-        # Convert element type
-        for key in list(mesh_data["elements"].keys()):
-            if key.startswith("CPS"):  # shell elements
-                mesh_data["elements"]["S" + key[3:] + "R"] = mesh_data["elements"].pop(key)
-            else:
-                raise ValueError(f"ERROR: Unrecognised element type {key}")
 
         # Convert lists to numpy arrays
         mesh_data["nodes"] = np.array(mesh_data["nodes"], dtype=object)

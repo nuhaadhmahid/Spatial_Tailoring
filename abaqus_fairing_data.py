@@ -115,21 +115,16 @@ class FairingData:
 
         # Sets
         HingeSet = Instance.nodeSets["PIVOT"]
-        try:
-            ShellSet = Instance.elementSets["SHELL_EQUIVALENT"]  # Only in equivalent shell model
-        except:
-            ShellSet = None
-        try:
-            OuterSurfaceSet = Instance.nodeSets["OUTER_SURFACE"]  # Only if it exist (Shell Model)
-        except:
-            print("ERROR: OuterSurfaceSet not found")
+        OuterSurfaceShellSet = Instance.elementSets["OUTER_SURFACE"]
+        OuterSurfaceNodeSet = Instance.nodeSets["OUTER_SURFACE"]  
+
 
         # Collect frame data
         count = 0
         for step in odb.steps.values():
             for frame in step.frames:
-                self.get_frame_nodal_data(frame, HingeSet, OuterSurfaceSet, count)
-                self.get_frame_element_data(frame, ShellSet, count)
+                self.get_frame_nodal_data(frame, HingeSet, OuterSurfaceNodeSet, count)
+                self.get_frame_element_data(frame, OuterSurfaceShellSet, count)
                 count += 1
 
         # close
@@ -149,6 +144,7 @@ if __name__ == '__main__':
     original_stdout = sys.stdout  # Save a reference to the original standard output
     f = open(status_file, "w")  # a to append
     sys.stdout = f  # Change the standard output to the file we created.
+    print("Testing Abaqus output redirection: case %s"%(case_number))
 
     # Extract data
     try:
@@ -167,7 +163,7 @@ if __name__ == '__main__':
 
     # Closing Abaqus dump file
     if not f.closed:
-        print("Closing log file")
+        print("Completed successfully.")
         sys.stdout = original_stdout  # Reset the standard output to its original value
         f.close()
         

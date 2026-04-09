@@ -211,9 +211,9 @@ class FairingGeometry:
             # create physical groups for floating ribs
             if num_ribs > 2:
                 for i in range(1, num_ribs-1):
-                    CAD.addPhysicalGroup(0, [rib_ref_tags[i-1]], name=f"FLOAT_{i}")
+                    MODEL.addPhysicalGroup(0, [rib_ref_tags[i-1]], name=f"FLOAT_{i}")
             # pivoting rib
-            CAD.addPhysicalGroup(0, [rib_ref_tags[-1]], name="PIVOT")
+            MODEL.addPhysicalGroup(0, [rib_ref_tags[-1]], name="PIVOT")
 
             # Synchronise
             CAD.synchronize()
@@ -275,16 +275,19 @@ class FairingGeometry:
                 num_arc_units, rem = divmod(
                     wing_cross_section_arc_length, self.RVE_variables["ly"]
                 )
+                
                 if rem > 0.0:
                     print(
                         f"\tWARNING: rib arc length not an integer multiple of cell size. Num cells {num_arc_units}, Remainder {rem:.4f}"
                     )
                 if self.var["element_size"] is None:
-                    num_cells_in_wing_cross_section = int(num_arc_units)
+                    num_nodes_in_wing_cross_section = int(num_arc_units)
                 else:
-                    num_cells_in_wing_cross_section = int(
+                    num_nodes_in_wing_cross_section = int(
                         wing_cross_section_arc_length / self.var["element_size"]
                     )
+                if num_nodes_in_wing_cross_section % 2 == 0:
+                    num_nodes_in_wing_cross_section += 1  # ensure odd number for symmetry
 
                 # Spanwise discretisation
                 num_ribs = 2 + self.var["num_floating_ribs"]
@@ -295,11 +298,13 @@ class FairingGeometry:
                         f"\tWARNING: bay spacing not an integer multiple of cell size. Num cells {num_bay_units}, Remainder {rem:.4f}"
                     )
                 if self.var["element_size"] is None:
-                    num_cells_in_wing_rib_bay = int(num_bay_units)
+                    num_nodes_in_wing_rib_bay = int(num_bay_units)
                 else:
-                    num_cells_in_wing_rib_bay = int(
+                    num_nodes_in_wing_rib_bay = int(
                         rib_spacing / self.var["element_size"]
                     )
+                if num_nodes_in_wing_rib_bay % 2 == 0:
+                    num_nodes_in_wing_rib_bay += 1  # ensure odd number for symmetry
 
                 # Check if the airfoil is closed (last point equals first point)
                 is_closed_profile = np.allclose(
@@ -325,7 +330,7 @@ class FairingGeometry:
                 # Calculate and print the length of the first rib line
                 CAD.synchronize()  # Ensure the geometry is synchronized
                 CAD.mesh.setTransfiniteCurve(
-                    first_rib_line, num_cells_in_wing_cross_section
+                    first_rib_line, num_nodes_in_wing_cross_section
                 )
 
                 # Create subsequent ribs using translation of the entire line
@@ -344,7 +349,7 @@ class FairingGeometry:
 
                     # Set transfinite
                     CAD.mesh.setTransfiniteCurve(
-                        new_rib_line, num_cells_in_wing_cross_section
+                        new_rib_line, num_nodes_in_wing_cross_section
                     )
 
                     # Store the new rib line
@@ -395,7 +400,7 @@ class FairingGeometry:
                             ]
                         )
                     for line in TE_line_tags[-1]:
-                        CAD.mesh.setTransfiniteCurve(line, num_cells_in_wing_rib_bay)
+                        CAD.mesh.setTransfiniteCurve(line, num_nodes_in_wing_rib_bay)
 
                     # Curve Loop
                     temp_TE = (
@@ -683,11 +688,11 @@ class FairingGeometry:
                 CAD.synchronize()
 
                 # Remove existing physical groups
-                CAD.removePhysicalGroups([])
+                MODEL.removePhysicalGroups([])
 
                 # Create physical groups for element sets
                 for name, elset in geometry["elsets"].items():
-                    CAD.addPhysicalGroup(2, elset, name=name)
+                    MODEL.addPhysicalGroup(2, elset, name=name)
 
                 # Synchronize
                 CAD.synchronize()
@@ -708,11 +713,11 @@ class FairingGeometry:
                     # Filter only rib elements
                     local_rib_elements = np.intersect1d(local_rib_elements, ribs_elements)
                     # Create physical group
-                    CAD.addPhysicalGroup(2, local_rib_elements, name=["RIB_0", "RIB_P"][i])
+                    MODEL.addPhysicalGroup(2, local_rib_elements, name=["RIB_0", "RIB_P"][i])
 
                 # Create physical groups for Materials
                 # CORE
-                CAD.addPhysicalGroup(
+                MODEL.addPhysicalGroup(
                     2,
                     np.r_[*(
                         geometry["elsets"][elset]
@@ -723,7 +728,7 @@ class FairingGeometry:
                 # facesheet
                 facesheet_elsets = np.intersect1d(np.array(["OUTER_SURFACE", "INNER_SURFACE"]), np.array(list(geometry["elsets"].keys())))
                 if facesheet_elsets.size != 0:
-                    CAD.addPhysicalGroup(
+                    MODEL.addPhysicalGroup(
                         2,
                         np.r_[*(
                             geometry["elsets"][elset]
@@ -739,6 +744,18 @@ class FairingGeometry:
                 """
                 Generate the mesh  and saves it in ABAQUS format.
                 """
+
+                ## Testing functionality # TODO: remove later
+                for file_type in ["step", "brep", "iges"]:
+                    gmsh.write(
+                        os.path.join(
+                            self.directory.case_folder,
+                            "mesh",
+                            f"{self.case_number}_fairing_CAD.{file_type}",
+                        )
+                    )
+
+
                 # Mesh generation
                 gmsh.option.setNumber("Mesh.MeshSizeMax", self.var["element_size"])
                 gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay for 2D
@@ -912,7 +929,7 @@ class FairingGeometry:
 
         # Set GMSH model name
         MODEL = gmsh.model
-        CAD = MODEL.geo
+        CAD = MODEL.occ
         MESH = MODEL.mesh
 
         # GMSH processes
@@ -1139,12 +1156,12 @@ class FairingAnalysis(FairingGeometry):
             self.load_mesh_data()
 
         # surface nodes
-        surface_nodes = self.mesh_data["nsets"]["OUTER_SURFACE"]
+        surface_nodes_set = self.mesh_data["nsets"]["OUTER_SURFACE"]
 
         # surface nodes coods
         surface_nodes_coords = self.mesh_data["nodes"][
-            Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes), 1:
-        ]
+            Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes_set), 1:
+        ] # ordered to surface_nodes_set
 
         increments = len(list(surface_nodes_U.values())[0])
         fairing_distortion = np.zeros((increments))
@@ -1152,9 +1169,9 @@ class FairingAnalysis(FairingGeometry):
 
             # surface nodes displacements
             surface_nodes_displacements = np.array(
-                [surface_nodes_U[node_num][increment] for node_num in surface_nodes],
+                [surface_nodes_U[node_num][increment] for node_num in surface_nodes_set],
                 dtype=np.float32
-            )
+            ) # ordered to surface_nodes_set
             displaced_surface_nodes = surface_nodes_coords + surface_nodes_displacements
 
             # Maximum vertical displacement
@@ -1164,23 +1181,24 @@ class FairingAnalysis(FairingGeometry):
             surface_node_number_to_displacement = {}
             surface_node_number_to_displaced_coords = {}
             for node_num, disp, disp_coord in zip(
-                surface_nodes, surface_nodes_displacements, displaced_surface_nodes
+                surface_nodes_set, surface_nodes_displacements, displaced_surface_nodes
             ):
                 surface_node_number_to_displacement[node_num] = disp
                 surface_node_number_to_displaced_coords[node_num] = disp_coord
 
             # surface elements
-            surface_elements = self.mesh_data["elsets"]["OUTER_SURFACE"]
+            surface_elements_set = self.mesh_data["elsets"]["OUTER_SURFACE"]
+
             # nodes of surface elements
             for elements in self.mesh_data["elements"].values():
-                if np.isin(elements[:, 0], surface_elements).all():
-                    indices = Utils.indices(elements[:, 0], surface_elements)
-                    surface_elements_nodes = elements[indices, 1:]
+                if np.isin(surface_elements_set, elements[:,0]).all():
+                    indices = Utils.indices(elements[:, 0], surface_elements_set)
+                    surface_elements_nodes = elements[np.ix_(indices, np.arange(1, elements.shape[1]))] # ordered to surface_elements_set
                     break
 
             # Get displacement of nodes for each surface element
             surface_elements_nodes_displacement = np.zeros(
-                (surface_elements.shape[0], surface_elements_nodes.shape[1], 3)
+                (surface_elements_set.shape[0], surface_elements_nodes.shape[1], 3)
             )
             for i, elem_nodes in enumerate(surface_elements_nodes):
                 for j, node_num in enumerate(elem_nodes):
@@ -1193,7 +1211,7 @@ class FairingAnalysis(FairingGeometry):
             if increment==0: 
                 # Get coordinates of nodes for each surface element
                 surface_elements_nodes_displaced_coords = np.zeros(
-                    (surface_elements.shape[0], surface_elements_nodes.shape[1], 3)
+                    (surface_elements_set.shape[0], surface_elements_nodes.shape[1], 3)
                 )
                 for i, elem_nodes in enumerate(surface_elements_nodes):
                     for j, node_num in enumerate(elem_nodes):
@@ -1212,15 +1230,15 @@ class FairingAnalysis(FairingGeometry):
                 except:
                     TE = self.mesh_data["nsets"]["TE"]
                 corner_node = self.mesh_data["nsets"]["RIB_0"][np.argwhere(np.isin(self.mesh_data["nsets"]["RIB_0"], TE)).squeeze()]
-                corner_element = surface_elements[np.argwhere(surface_elements_nodes[:, 0]==corner_node).squeeze()]
+                corner_element = surface_elements_set[np.argwhere(surface_elements_nodes[:, 0]==corner_node).squeeze()]
                 element_grid_shape = np.array([TE.shape[0]-1, self.mesh_data["nsets"]["RIB_0"].shape[0]-1])
 
                 # Saving mesh data to be used in the tailoring process
                 Utils.ReadWriteOps.save_object(
                     {
-                        "surface_nodes":surface_nodes,
+                        "surface_nodes":surface_nodes_set,
                         "surface_nodes_coords":surface_nodes_coords,
-                        "surface_elements":surface_elements, 
+                        "surface_elements":surface_elements_set, 
                         "surface_elements_nodes":surface_elements_nodes,
                         "surface_element_centroids":surface_element_centroids,
                         "corner_element":corner_element,
@@ -1234,7 +1252,7 @@ class FairingAnalysis(FairingGeometry):
                 continue
 
             # Element surface area
-            surface_element_areas = np.zeros(surface_elements.shape[0])
+            surface_element_areas = np.zeros(surface_elements_set.shape[0])
             for i, elem_nodes in enumerate(surface_elements_nodes):
                 coords = surface_elements_nodes_displaced_coords[i]
                 # Compute the area using the cross product of two edges
@@ -1322,12 +1340,29 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_10")
+    directory = Utils.Directory(case_name="test_case_12")
 
     # # RVE
     # RVE = RVE(
     #     variables={
-    #         "chevron_wall_length": Utils.Units.mm2m(80.0),
+    #         ## Chevon pointing each other
+    #         "mirror_symmetry": [True, True], 
+    #         "num_tiles": [1, 1],
+    #         ## Chevon pointing same direction
+    #         # "mirror_symmetry": [True, False],
+    #         # "num_tiles": [1, 2],
+    #         ## Restoring default values
+    #         "chevron_angle": Utils.Units.deg2rad(60.0),
+    #         "chevron_wall_length": Utils.Units.mm2m(30.0),
+    #         "chevron_thickness": Utils.Units.mm2m(1.5),
+    #         "chevron_pitch": Utils.Units.mm2m(10.0),
+    #         "rib_thickness": Utils.Units.mm2m(3.0),
+    #         "core_thickness": Utils.Units.mm2m(26.0),
+    #         "facesheet_thickness": Utils.Units.mm2m(0.5),
+    #         "core_material": (396e6, 0.48),
+    #         "facesheet_material": (22.9e6, 0.48),
+    #         "element_type": "C3D8R", 
+    #         "element_size": 0.001
     #     },
     #     directory=directory,
     #     case_number=0
@@ -1350,7 +1385,9 @@ if __name__ == "__main__":
     #     case_number=0,
     #     RVE_identifier=0
     # )
+    # fairing.generate_mesh()
     # fairing.analysis()
+    # fairing.extract_fairing_data()
     # fairing.post_process_results()
 
     # # TODO: Add the lattice generation and analysis for explicit model
@@ -1375,7 +1412,7 @@ if __name__ == "__main__":
         directory=directory,
         case_number=1,
     )
-    # tailored.generate_mesh()
-    # tailored.run_abaqus(num_core=10)
-    # tailored.extract_fairing_data()
-    tailored.post_process_results()
+    tailored.generate_mesh()
+    # # tailored.run_abaqus(num_core=10)
+    # # tailored.extract_fairing_data()
+    # tailored.post_process_results()
