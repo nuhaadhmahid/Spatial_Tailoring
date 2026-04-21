@@ -1,4 +1,8 @@
 # Tailoring.py
+import re
+
+import scipy
+
 import Utils
 from Utils import FairingData
 from Mesh import Mesh
@@ -147,7 +151,6 @@ class Tracer:
         self.nodes_grid_2D = np.zeros(*np.c_[*self.node_index_grid.shape, 2], dtype=np.float32)
 
         # Moving origin to leading edge
-        print("Shape of node grid:", self.node_index_grid.shape)
         FE_j_index = np.linalg.norm(self.surface_nodes_coords[self.node_index_grid][0, :], axis=1).argmin()
 
         # Cumulative sum of differences up to each index (along axis 0, span)
@@ -898,7 +901,7 @@ class Lattice:
 
         return lines
 
-    def create_fairing_2D(self, min_edge_length=0.02, bool_plot=False):
+    def create_fairing_2D(self, min_length, bool_plot=False):
         """
         Creates a 2D mesh from lattice lines for each increment.
         Uses triangulation to create triangular elements.
@@ -923,7 +926,6 @@ class Lattice:
             self.fairing_chord = FR_input["fairing_chord"]
 
         # Refine lines
-        min_length = 1e-2*self.fairing_chord
         keys = ["STRINGERS", "CHEVRONS", "RIBS"]
         assert all(key in self.lattice_lines.keys() for key in keys), "Error: Missing lattice lines for fairing creation."
         for key in keys:
@@ -963,26 +965,50 @@ class Lattice:
                 save_path=os.path.join(self.directory.case_folder, "fig", f"rc{self.reference_case}_rf{self.reference_field}_cn{self.case_number}_triangles_2D.svg")
             )
 
-    def init_f_interp_2D_to_3D(self):
+    def init_f_interp_2D_to_3D(self, use_aerofoil = True):
         """
         Creates an RBF interpolator to map 2D nodes to 3D space.
         Uses grid data to create the mapping.
         """
-        # Load grid data
-        if self.grid_data is None:
-            self.grid_data = Utils.ReadWriteOps.load_object(
-                os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_grid_data"),
-                method="pickle"
+        if use_aerofoil==True:
+            print("\t\tUsing aerofoil coordinates for 2D to 3D mapping.")
+
+            # Load aerofoil coordinates
+            if self.aerofoil_coords is None:
+                self.aerofoil_coords = Utils.ReadWriteOps.load_object(
+                    os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_aerofoil_coords"),
+                    method="pickle"
+                )
+            else:
+                self.aerofoil_coords = self.aerofoil_coords
+
+            # Interpolator
+            interpolator = Utils.GeoOps.chordline_interpolator(
+                self.aerofoil_coords["mid"], True
             )
+            
+            f_interp_2D_to_3D = lambda x: np.insert(
+                interpolator(x[:, 0]), [1], x[:, 1][:,None], axis=1
+            )
+                
         else:
-            self.grid_data = self.grid_data
+            print("\t\tUsing grid coordinates for 2D to 3D mapping. This may lead to inaccuracies in the leading edge region.")
 
-        # Interpolation data
-        node_coords_3D = self.grid_data["surface_nodes_coords"][self.grid_data["node_index_grid"]].reshape((-1,3))
-        node_coords_2D = self.grid_data["nodes_grid_2D"].reshape((-1,2))
+            # Load grid data
+            if self.grid_data is None:
+                self.grid_data = Utils.ReadWriteOps.load_object(
+                    os.path.join(self.directory.case_folder, "data", f"{self.reference_case}_grid_data"),
+                    method="pickle"
+                )
+            else:
+                self.grid_data = self.grid_data
 
-        # Create RBF interpolator
-        f_interp_2D_to_3D = interpolate.RBFInterpolator(node_coords_2D, node_coords_3D, neighbors=4, kernel='linear')
+            # Interpolation data
+            node_coords_3D = self.grid_data["surface_nodes_coords"][self.grid_data["node_index_grid"]].reshape((-1,3))
+            node_coords_2D = self.grid_data["nodes_grid_2D"].reshape((-1,2))
+
+            # Create RBF interpolator
+            f_interp_2D_to_3D = interpolate.RBFInterpolator(node_coords_2D, node_coords_3D, neighbors=4, kernel='linear')
 
         return f_interp_2D_to_3D
 
@@ -1167,11 +1193,11 @@ class Lattice:
             f.write("\n".join(lines) + "\n")
 
     @Utils.logger
-    def analysis(self, min_edge_length=0.02):
+    def analysis(self, min_length):
         print(f"Starting {self.__class__.__name__} analysis {self.directory.case_name} - {self.case_number}")
         
         # Create 2D fairing mesh
-        self.create_fairing_2D(min_edge_length=min_edge_length)
+        self.create_fairing_2D(min_length=min_length)
         # Map 2D mesh to 3D
         self.mapping_2D_to_3D()
         # Write mesh to file
@@ -1180,7 +1206,7 @@ class Lattice:
 
 if __name__ == "__main__":
     # Example
-    directory = Utils.Directory(case_name="test_case_12")
+    directory = Utils.Directory(case_name="test_case_14")
     case_number = 1 # current case number
 
     # Trace Lattice
@@ -1195,7 +1221,7 @@ if __name__ == "__main__":
     tailored = Lattice(directory, case_number, reference_case, reference_field)
     # tailored.analysis()
 
-    tailored.create_fairing_2D(bool_plot=True)
+    tailored.create_fairing_2D(min_length=0.02, bool_plot=True)
     tailored.mapping_2D_to_3D(bool_plot=True)
     tailored.write_mesh()
 

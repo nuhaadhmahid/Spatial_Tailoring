@@ -7,6 +7,7 @@ import numpy as np
 import subprocess
 import re
 import matplotlib.pyplot as plt
+import scipy
 
 
 def logger(func):
@@ -85,6 +86,11 @@ def run_subprocess(command, run_folder, log_file):
             log.write(f"--- COMMAND : {command}\n")
             log.write(f"--- STDOUT ---\n{process.stdout}\n") if process.stdout else None
             log.write(f"--- STDERR ---\n{process.stderr}\n") if process.stderr else None
+        # check for errors
+        if process.stdout.lower().find("error") != -1:
+            print(f"--- ERROR in STDOUT ---\n{process.stdout}")
+        if process.stderr.lower().find("error") != -1:
+            print(f"--- ERROR in STDERR ---\n{process.stderr}")
     except subprocess.CalledProcessError as e:
         print(f"ERROR: Execution failed for command:\n{command}.")
         print(f"--- RETURN CODE ---\n{e.returncode}") if e.returncode else None
@@ -134,8 +140,12 @@ class ReadWriteOps:
                 try:
                     return pickle.load(f)
                 except UnicodeDecodeError:
-                    # for loading python 2 pickles in python 3
-                    return pickle.load(f, encoding='latin1')
+                    try:
+                        # for loading python 2 pickles in python 3
+                        return pickle.load(f, encoding='latin1')
+                    except:
+                        print("ERROR: Failed to load pickle file.")
+                        return None
         elif method == "json":
             with open(path + ".json", "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -279,6 +289,81 @@ class GeoOps:
     """
 
     @staticmethod
+    def index_LE(ref_coords):
+        """
+        Find the index of the leading edge in the reference coordinates.
+        Parameters:
+            ref_coords (numpy.ndarray): An array of shape (n, 2) containing the x and z coordinates of the reference airfoil.
+        Returns:
+            int: The index of the leading edge in the reference coordinates.
+        """
+        # find leading edge index
+        le_idx = np.argmin(np.linalg.norm(ref_coords, axis=1))
+
+        # # sanity check: index where sign change from top to bottom occurs
+        # top_idx = np.argmax(ref_coords[:, 1])
+        # bottom_idx = np.argmin(ref_coords[:, 1])
+        # sign_change_idx = (
+        #     np.argwhere(
+        #         np.diff(np.sign(ref_coords[top_idx:bottom_idx, 1]) != 0)
+        #     )
+        #     + top_idx
+        # )
+        # print(f"Leading edge index: {le_idx}, Sign change indices: {sign_change_idx.squeeze()}")
+        # assert le_idx in sign_change_idx.squeeze(), (
+        #     "Leading edge index does not match sign change index"
+        # )
+
+        return le_idx
+
+    @staticmethod
+    def chordline_interpolator(ref_coords, inverse=False):
+        """
+        Create an interpolator function that maps 
+         - 2D coordinates to their corresponding stretched out chordline
+         - or if inverse==True, maps strecthed out chordline to their corresponding 2D coordinates
+        based on a reference airfoil shape.
+        Parameters:
+            ref_coords (numpy.ndarray): An array of shape (n, 2) containing the x and y coordinates of the reference airfoil.
+            ref_chord (float): The chord length of the reference airfoil.
+            inverse (bool): If True, creates an inverse interpolator.
+        Returns:
+            function: The interpolator function.
+        """
+        if not isinstance(ref_coords, np.ndarray) or ref_coords.ndim != 2 or ref_coords.shape[1] != 2:
+            raise ValueError(
+                f"Input ref_coords must be an array of shape (n, 2). Received {ref_coords.shape}"
+            )
+        
+        # find leading edge index
+        le_idx = GeoOps.index_LE(ref_coords)
+
+        # chordline with LE as origin
+        chordline = - np.cumsum(
+            np.r_[
+                np.array([0.0]), 
+                np.linalg.norm(np.diff(ref_coords, axis=0), axis=1)
+            ],
+            axis=0
+        )
+        chordline -= chordline[le_idx]
+        
+
+        # interpolator
+        if inverse==True: # chordline to 2D coordinates
+            print("\t\tUsing chordline to 2D coordinates interpolator")
+            interpolator_f = scipy.interpolate.interp1d(
+                chordline, ref_coords, axis=0, fill_value="extrapolate"
+            )
+        else: # 2D coordinates to chordline
+            print("\t\tUsing 2D coordinates to chordline interpolator")
+            interpolator_f = scipy.interpolate.RBFInterpolator(
+                ref_coords, chordline, neighbors=2, kernel="linear"
+            )
+
+        return interpolator_f
+
+    @staticmethod
     def normals_2D(points):
         """
         Calculate the normal vector at a point on a 2D curve.
@@ -417,7 +502,7 @@ class GeoOps:
         return new_line
 
     @staticmethod
-    def generate_naca_4digit(naca_code, num_points=100):
+    def generate_naca_4digit(naca_code, num_points=None):
         """
         Generate coordinates for a NACA 4-digit airfoil.
 
@@ -428,6 +513,9 @@ class GeoOps:
         Returns:
         numpy.ndarray: Array of [x, y] coordinates
         """
+        if num_points is None:
+            num_points = 100
+
         # Parse NACA digits
         m = int(naca_code[0]) / 100.0  # Maximum camber
         p = int(naca_code[1]) / 10.0  # Location of maximum camber
@@ -486,34 +574,41 @@ class GeoOps:
         return np.column_stack((x_coords, y_coords))
 
     @staticmethod
-    def offset_airfoil(outer_aerofoil_coords, panel_thickness):
+    def offset_airfoil(aerofoil_coords, panel_thickness, num_averaging=0, window=3):
         """
         Offset airfoil coordinates inward by a specified distance.
 
         Parameters:
             airfoil_coords (numpy.ndarray): Array of [x, y] coordinates of the airfoil
-            offset_distance (float): Distance to offset points inward
+            panel_thickness (float): Thickness of the panel
+            num_averaging (int): Number of averaging iterations for normal calculation
+            window (int): Window size for averaging
 
         Returns:
             numpy.ndarray: Offset airfoil coordinates
         """
 
         # Initialising arrays
-        # n_points = len(outer_aerofoil_coords)
-        mid_aerofoil_coords = np.zeros_like(outer_aerofoil_coords)
-        inner_aerofoil_coords = np.zeros_like(outer_aerofoil_coords)
+        mid_aerofoil_coords = np.zeros_like(aerofoil_coords)
+        inner_aerofoil_coords = np.zeros_like(aerofoil_coords)
 
         # Find the leading edge (minimum x-coordinate)
-        le_idx = np.argmin(np.linalg.norm(outer_aerofoil_coords, axis=1))
-        top_idx = np.argmax(outer_aerofoil_coords[:, 1])
-        bottom_idx = np.argmin(outer_aerofoil_coords[:, 1])
+        le_idx = np.argmin(np.linalg.norm(aerofoil_coords, axis=1))
+        top_idx = np.argmax(aerofoil_coords[:, 1])
+        bottom_idx = np.argmin(aerofoil_coords[:, 1])
 
         # Calculating normal at each point
-        normals = GeoOps.normals_2D(outer_aerofoil_coords)
+        normals = GeoOps.normals_2D(aerofoil_coords)
+
+        # Average normals
+        if num_averaging > 0:
+            for _ in range(num_averaging):
+                normals = scipy.ndimage.uniform_filter1d(normals, size=window, axis=0, mode='nearest')
 
         # Offsetting using the normals and distances
-        mid_aerofoil_coords = outer_aerofoil_coords + panel_thickness / 2 * normals
-        inner_aerofoil_coords = outer_aerofoil_coords + panel_thickness * normals
+        outer_aerofoil_coords = aerofoil_coords
+        mid_aerofoil_coords = aerofoil_coords + panel_thickness / 2 * normals
+        inner_aerofoil_coords = aerofoil_coords + panel_thickness * normals
 
         # Finding contact point of inner aerofoil
         contact_point, indexes = GeoOps.intersection_point(
@@ -593,6 +688,20 @@ class GeoOps:
                 bottom_intersection_point,
             ]
         )
+
+        # # debugging plots
+        # fig, ax = plt.subplots()
+        # ax.plot(outer_aerofoil_coords[:, 0], outer_aerofoil_coords[:, 1], color ="r", label="Outer Aerofoil")
+        # ax.plot(mid_aerofoil_coords[:, 0], mid_aerofoil_coords[:, 1], color="g", label="Mid Aerofoil")
+        # ax.plot(inner_aerofoil_coords[:, 0], inner_aerofoil_coords[:, 1], color="b", label="Inner Aerofoil")
+        # for i in range(aerofoil_coords.shape[0]):
+        #     ax.plot(
+        #         *np.c_[aerofoil_coords[i], aerofoil_coords[i] + normals[i] * panel_thickness],
+        #         color="k", linewidth=0.1
+        #     )
+        # ax.legend()
+        # ax.set_aspect("equal", adjustable="box")
+        # plt.show()
 
         return {
             "inner": inner_aerofoil_coords,
@@ -784,7 +893,9 @@ class Plots:
                 plt.plot(coords[:, 0], coords[:, 1], label=f"Aerofoil {i}")
         elif isinstance(aerofoils, dict):
             for name, coords in aerofoils.items():
-                plt.plot(coords[:, 0], coords[:, 1], label=str(name))
+                plt.plot(
+                    coords[:, 0], coords[:, 1], label=str(name).capitalize()
+                )
         else:
             raise TypeError(
                 "Input must be a list or dictionary of aerofoil coordinates"

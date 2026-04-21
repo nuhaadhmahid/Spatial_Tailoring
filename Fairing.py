@@ -7,6 +7,7 @@ import traceback
 import gmsh
 import numpy as np
 import scipy
+import pandas as pd
 
 import Utils
 import Tailoring
@@ -33,7 +34,7 @@ class FairingGeometry:
         self.case_number = case_number
 
         # loading default variables
-        self.var = FAIRING_DEFAULTS.copy()
+        self.var = FAIRING_DEFAULTS.copy()  
         if variables:
             self.var.update(variables)
 
@@ -106,7 +107,7 @@ class FairingGeometry:
             method="json",
         )
 
-    def load_aerofoil(self,aerofoil_database=None,num_points=100):
+    def load_aerofoil(self,aerofoil_database=None, num_points=None):
         if aerofoil_database is None:
             aerofoil_database = os.path.join(
                 self.directory.run_folder, "aerofoil_database"
@@ -148,31 +149,32 @@ class FairingGeometry:
 
         # Resample
         coordinates = np.array(coordinates)
-        # interpolate to required number of points
-        le_idx = np.argmin(np.linalg.norm(coordinates, axis=1))
-        # Generate x-coordinates (cosine spacing for better point distribution)
-        beta = np.linspace(0, np.pi, num_points)
-        x = (1.0 - np.cos(beta)) / 2.0
-        # Interpolate y-coordinates for upper and lower surfaces
-        yu = scipy.interpolate.interp1d(
-            coordinates[: le_idx + 1, 0],
-            coordinates[: le_idx + 1, 1],
-            fill_value="extrapolate"
-        )(x)
-        yl = scipy.interpolate.interp1d(
-            coordinates[le_idx:, 0],
-            coordinates[le_idx:, 1],
-            fill_value="extrapolate"
-        )(x)
-        # Combine upper and lower surfaces
-        x_coords = np.concatenate([np.flip(x), x[1:]])
-        y_coords = np.concatenate([np.flip(yu), yl[1:]])
-        coordinates = np.column_stack((x_coords, y_coords))
+
+        if num_points is not None:
+            # interpolate to required number of points
+            le_idx = Utils.GeoOps.index_LE(coordinates) 
+            # Generate x-coordinates (cosine spacing for better point distribution)
+            beta = np.linspace(0, np.pi, num_points)
+            x = (1.0 - np.cos(beta)) / 2.0
+            # Interpolate y-coordinates for upper and lower surfaces
+            yu = scipy.interpolate.interp1d(
+                coordinates[: le_idx + 1, 0],
+                coordinates[: le_idx + 1, 1]
+                # fill_value="extrapolate"
+            )(x)
+            yl = scipy.interpolate.interp1d(
+                coordinates[le_idx:, 0],
+                coordinates[le_idx:, 1]
+                # fill_value="extrapolate"
+            )(x)
+            # Combine upper and lower surfaces
+            x_coords = np.concatenate([np.flip(x), x[1:]])
+            y_coords = np.concatenate([np.flip(yu), yl[1:]])
+            coordinates = np.column_stack((x_coords, y_coords))
 
         return coordinates
 
-
-    def load_mesh_data(self):
+    def load_mesh_data(self, folder="inp"):
         """
         Load the mesh data for the fairing.
         """
@@ -180,7 +182,7 @@ class FairingGeometry:
         self.mesh_data = Utils.ReadWriteOps.read_mesh_data(
             os.path.join(
                 self.directory.case_folder,
-                "mesh",
+                folder,
                 f"{self.case_number}_fairing_mesh.inp",
             )
         )
@@ -218,50 +220,175 @@ class FairingGeometry:
             # Synchronise
             CAD.synchronize()
 
+        def get_aerofoil_coords(num_points=None):
+            # Check if it"s a NACA 4-digit specification (e.g., "0012")
+            if (
+                self.var["aerofoil_name"].startswith("naca")
+                and len(self.var["aerofoil_name"].split("naca")[-1]) == 4
+            ):
+                # Use NACA 4-digit generator
+                naca_code = self.var["aerofoil_name"].split("naca")[-1]
+                reference_aerofoil_coords = Utils.GeoOps.generate_naca_4digit(
+                    naca_code, num_points
+                )
+            else:
+                # Load airfoil from file
+                reference_aerofoil_coords = self.load_aerofoil(
+                    num_points=num_points
+                )
+
+            # Scaling cross-section
+            reference_aerofoil_coords *= self.var["fairing_chord"]
+
+            self.aerofoil_coords = {"reference":reference_aerofoil_coords}
+
+        def offset_aerofoil_coords(num_points=None, num_averaging=0, window=3, bool_plot=False):
+
+            # get aerofoil coords if not already loaded
+            if not hasattr(self, "aerofoil_coords"):
+                get_aerofoil_coords(num_points=num_points)
+
+            # Offset airfoil coordinates
+            panel_thickness = self.RVE_variables["lz"]
+            self.aerofoil_coords |= Utils.GeoOps.offset_airfoil(
+                self.aerofoil_coords["reference"], panel_thickness, num_averaging, window
+            )
+
+            # Saving aerofoil coordinates
+            Utils.ReadWriteOps.save_object(
+                self.aerofoil_coords,
+                os.path.join(
+                    self.directory.case_folder,
+                    "data",
+                    f"{self.case_number}_aerofoil_coords",
+                ),
+                "pickle",
+            )
+
+            # Aerofoil plotting
+            if bool_plot:
+                Utils.Plots.aerofoils(
+                    aerofoils=self.aerofoil_coords,
+                    save_path=os.path.join(
+                        self.directory.case_folder,
+                        "fig",
+                        f"{self.case_number}_aerofoils.png",
+                    ),
+                )
+
+        def create_surface_elsets(aerofoil_coords):
+            """
+            Create element sets for the top and bottom surfaces of the fairing based on the chordwise position of the surface element centroids.
+            """
+            # checks
+            assert np.all(
+                self.mesh_data["nodes"][:, 0]
+                == np.arange(self.mesh_data["nodes"].shape[0]) + 1
+            ), (
+                "Node numbers in mesh data are expected to start from 1 and be in ascending order without any missing numbers. Please check the mesh data."
+            )
+            assert len(self.mesh_data["elements"]) == 1, (
+                "Expected only one element type in the mesh data. Please check the mesh data."
+            )
+            elements = np.vstack([
+                    list(
+                        elements
+                        for elements in self.mesh_data["elements"].values()
+                    )
+                ]).squeeze()  
+            assert np.all(elements[:, 0] == np.arange(elements.shape[0]) + 1),"Element numbers in mesh data are expected to start from 1 and be in ascending order without any missing numbers. Please check the mesh data."
+
+            # surface elements
+            surface_elements_set = self.mesh_data["elsets"]["OUTER_SURFACE"]
+            surface_elements_nodes = elements[
+                Utils.indices(elements[:, 0], surface_elements_set),
+                1:,
+            ]
+
+            # surface element centroids
+            surface_elements_centroids = self.mesh_data["nodes"][
+                surface_elements_nodes - 1
+            ][:, :, 1:].mean(axis=1)
+
+            # chordline classifier
+            chordline_interp_f = Utils.GeoOps.chordline_interpolator(
+                aerofoil_coords,
+            )
+            classifier = chordline_interp_f(
+                surface_elements_centroids[:, [0, 2]]
+            )
+
+            # create element sets for top and bottom surfaces
+            top_surface_elements_set = surface_elements_set[classifier > 0]
+            bottom_surface_elements_set = surface_elements_set[classifier < 0]
+            self.mesh_data["elsets"]["OUTER_SURFACE_TOP"] = (
+                top_surface_elements_set
+            )
+            self.mesh_data["elsets"]["OUTER_SURFACE_BOTTOM"] = (
+                bottom_surface_elements_set
+            )
+            assert (
+                self.mesh_data["elsets"]["OUTER_SURFACE"].shape[0]
+                == self.mesh_data["elsets"]["OUTER_SURFACE_TOP"].shape[0]
+                + self.mesh_data["elsets"]["OUTER_SURFACE_BOTTOM"].shape[0]
+            )
+
+            ###
+            # This is required for calculation of distortion and for tailoring process
+
+            # surface nodes, masks and coords
+            surface_nodes_set = self.mesh_data["nsets"]["OUTER_SURFACE"]
+            surface_nodes_coords = self.mesh_data["nodes"][
+                Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes_set), 1:
+            ]
+
+            # collect mesh data
+            mesh_data = {
+                "surface_nodes": surface_nodes_set,
+                "surface_nodes_coords": surface_nodes_coords,
+                "surface_elements": surface_elements_set,
+                "surface_elements_nodes": surface_elements_nodes,
+                "surface_element_centroids": surface_elements_centroids,
+                "top_surface_elements": top_surface_elements_set,
+                "bottom_surface_elements": bottom_surface_elements_set,
+            }
+
+            # params for tailoring
+            if "S4R" in self.mesh_data["elements"].keys():
+                try:
+                    TE = self.mesh_data["nsets"]["TE_TOP"]
+                except:
+                    TE = self.mesh_data["nsets"]["TE"]
+
+                mesh_data["corner_node"] = self.mesh_data["nsets"]["RIB_0"][
+                    np.argwhere(
+                        np.isin(self.mesh_data["nsets"]["RIB_0"], TE)
+                    ).squeeze()
+                ]
+                mesh_data["corner_element"] = surface_elements_set[
+                    np.argwhere(
+                        surface_elements_nodes[:, 0] == mesh_data["corner_node"]
+                    ).squeeze()
+                ]
+                mesh_data["element_grid_shape"] = np.array(
+                    [TE.shape[0] - 1, self.mesh_data["nsets"]["RIB_0"].shape[0] - 1]
+                )
+
+            # Saving mesh data to be used in the tailoring process
+            Utils.ReadWriteOps.save_object(
+                mesh_data,
+                os.path.join(
+                    self.directory.case_folder,
+                    "data",
+                    f"{self.case_number}_fairing_mesh_data",
+                ),
+                "pickle",
+            )
+
         def create_equivalent_model():
             """
             Generate a shell model for the fairing either using isotropic material properties of the core or equivalent shell stiffness of the panel.
             """
-            def get_aerofoil_cords(num_points=100, bool_plot=False):
-                # Check if it"s a NACA 4-digit specification (e.g., "0012")
-                if (
-                    self.var["aerofoil_name"].startswith("naca")
-                    and len(self.var["aerofoil_name"].split("naca")[-1]) == 4
-                ):
-                    # Use NACA 4-digit generator
-                    naca_code = self.var["aerofoil_name"].split("naca")[-1]
-                    refence_aerofoil_coords = Utils.GeoOps.generate_naca_4digit(naca_code, num_points)
-                else:
-                    # Load airfoil from file
-                    refence_aerofoil_coords = self.load_aerofoil(num_points=num_points)
-
-                # Scaling cross-section
-                refence_aerofoil_coords *= self.var["fairing_chord"]
-
-                # Offset airfoil coordinates
-                panel_thickness = self.RVE_variables["lz"]
-                self.aerofoil_coords = Utils.GeoOps.offset_airfoil(
-                    refence_aerofoil_coords, panel_thickness
-                )
-
-                # Saving aerofoil coordinates
-                self.aerofoil_coords["reference"] = refence_aerofoil_coords
-                Utils.ReadWriteOps.save_object(
-                    self.aerofoil_coords,
-                    os.path.join(self.directory.case_folder, "data", f"{self.case_number}_aerofoil_coords"),
-                    "pickle"
-                )
-
-                # Aerofoil plotting
-                if bool_plot:
-                    Utils.Plots.aerofoils(
-                        self.aerofoil_coords,
-                        save_path=os.path.join(
-                            self.directory.case_folder,
-                            "fig",
-                            f"{self.case_number}_aerofoils.png",
-                        ),
-                    )
 
             def create_shell_geometry():
                 """
@@ -469,8 +596,11 @@ class FairingGeometry:
                 """
                 Generate the ABAQUS geometry with section, material, orientation rigid-body properties.
                 """
+                # load GMSH mesh data
+                self.load_mesh_data("mesh") 
 
-                self.load_mesh_data()
+                # add top and bottom surface element sets
+                create_surface_elsets(self.aerofoil_coords["mid"])
 
                 # initialise a list
                 lines = []
@@ -611,14 +741,15 @@ class FairingGeometry:
                     os.path.join(
                         self.directory.case_folder,
                         "inp",
-                        f"{self.case_number}_fairing_geometry.inp",
+                        f"{self.case_number}_fairing_mesh.inp",
                     ),
                     "w",
                 ) as f:
                     f.write("\n".join(lines))
 
             # Get cross-section shape
-            get_aerofoil_cords(500, bool_plot=True)
+            get_aerofoil_coords(num_points=None)
+            offset_aerofoil_coords(num_averaging=1, window=3, bool_plot=True)
 
             # Create shell geometry
             create_shell_geometry()
@@ -744,18 +875,6 @@ class FairingGeometry:
                 """
                 Generate the mesh  and saves it in ABAQUS format.
                 """
-
-                ## Testing functionality # TODO: remove later
-                for file_type in ["step", "brep", "iges"]:
-                    gmsh.write(
-                        os.path.join(
-                            self.directory.case_folder,
-                            "mesh",
-                            f"{self.case_number}_fairing_CAD.{file_type}",
-                        )
-                    )
-
-
                 # Mesh generation
                 gmsh.option.setNumber("Mesh.MeshSizeMax", self.var["element_size"])
                 gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay for 2D
@@ -781,28 +900,30 @@ class FairingGeometry:
                 Generate the ABAQUS geometry with section, material, orientation rigid-body properties.
                 """
 
-                # load mesh data
-                mesh = Utils.ReadWriteOps.read_mesh_data(
-                    os.path.join(
-                        self.directory.case_folder,
-                        "mesh",
-                        f"{self.case_number}_fairing_mesh.inp",
-                    )
-                )
+                # load GMSH mesh data
+                self.load_mesh_data("mesh")
 
                 # Pre-processing
                 # Remove rib elements
-                for type in mesh["elements"].keys():
-                    mesh["elements"][type] = mesh["elements"][type][
-                        ~np.isin(mesh["elements"][type][:, 0], mesh["elsets"]["RIBS"], assume_unique=True)
+                for type in self.mesh_data["elements"].keys():
+                    self.mesh_data["elements"][type] = self.mesh_data["elements"][type][
+                        ~np.isin(
+                            self.mesh_data["elements"][type][:, 0],
+                            self.mesh_data["elsets"]["RIBS"],
+                            assume_unique=True,
+                        )
                     ]
                 # Remove ribs elsets
-                for elset in list(mesh["elsets"].keys()):
+                for elset in list(self.mesh_data["elsets"].keys()):
                     if elset.startswith("RIB"):
-                        del mesh["elsets"][elset]
+                        del self.mesh_data["elsets"][elset]
                 # Enforce rib nodes location
-                mesh["nodes"][np.isin(mesh["nodes"][:, 0], mesh["nsets"]["RIB_0"], assume_unique=True)][:,2] = 0.0
-                mesh["nodes"][np.isin(mesh["nodes"][:, 0], mesh["nsets"]["RIB_P"], assume_unique=True)][:,2] = (self.var["fairing_span"]/(1+self.var["pre_strain"]))
+                self.mesh_data["nodes"][np.isin(self.mesh_data["nodes"][:, 0], self.mesh_data["nsets"]["RIB_0"], assume_unique=True)][:,2] = 0.0
+                self.mesh_data["nodes"][np.isin(self.mesh_data["nodes"][:, 0], self.mesh_data["nsets"]["RIB_P"], assume_unique=True)][:,2] = (self.var["fairing_span"]/(1+self.var["pre_strain"]))
+
+                # add top and bottom surface element sets
+                get_aerofoil_coords(num_points=None)
+                create_surface_elsets(self.aerofoil_coords["reference"])
 
                 # initialise a list
                 lines = []
@@ -812,27 +933,27 @@ class FairingGeometry:
                 lines.extend(
                     [
                         line
-                        for node in mesh["nodes"]
+                        for node in self.mesh_data["nodes"]
                         for line in Utils.ReadWriteOps.format_lines(node)
                     ]
                 )
 
                 # print elements
-                for type, element in mesh["elements"].items():
+                for type, element in self.mesh_data["elements"].items():
                     lines.append(f"*ELEMENT, TYPE={type}")
                     lines.extend(
                         [
                             line
-                            for element in mesh["elements"][type]
+                            for element in self.mesh_data["elements"][type]
                             for line in Utils.ReadWriteOps.format_lines(element)
                         ]
                     )
 
                 # print sets
-                for set_name, set_items in mesh["elsets"].items():
+                for set_name, set_items in self.mesh_data["elsets"].items():
                     lines.append(f"*ELSET, ELSET={set_name}")
                     lines.extend(Utils.ReadWriteOps.format_lines(set_items))
-                for set_name, set_items in mesh["nsets"].items():
+                for set_name, set_items in self.mesh_data["nsets"].items():
                     lines.append(f"*NSET, NSET={set_name}")
                     lines.extend(Utils.ReadWriteOps.format_lines(set_items))
 
@@ -846,11 +967,11 @@ class FairingGeometry:
                 )
 
                 # define section and material for each part
-                materials = np.intersect1d(np.array(["CORE", "FACESHEET"]), np.array(list(mesh["elsets"].keys())))
+                materials = np.intersect1d(np.array(["CORE", "FACESHEET"]), np.array(list(self.mesh_data["elsets"].keys())))
 
                 # define facesheet sections
                 if "FACESHEET" in materials:
-                    facesheet_sections = np.intersect1d(np.array(["INNER_SURFACE", "OUTER_SURFACE"]), np.array(list(mesh["elsets"].keys())))
+                    facesheet_sections = np.intersect1d(np.array(["INNER_SURFACE", "OUTER_SURFACE"]), np.array(list(self.mesh_data["elsets"].keys())))
                     offsets = {
                         "INNER_SURFACE": 0.5,
                         "OUTER_SURFACE": -0.5,
@@ -895,7 +1016,7 @@ class FairingGeometry:
                     os.path.join(
                         self.directory.case_folder,
                         "inp",
-                        f"{self.case_number}_fairing_geometry.inp",
+                        f"{self.case_number}_fairing_mesh.inp",
                     ),
                     "w",
                 ) as f:
@@ -929,7 +1050,7 @@ class FairingGeometry:
 
         # Set GMSH model name
         MODEL = gmsh.model
-        CAD = MODEL.occ
+        CAD = MODEL.geo
         MESH = MODEL.mesh
 
         # GMSH processes
@@ -957,35 +1078,49 @@ class FairingAnalysis(FairingGeometry):
         Add loading steps to the simulation.
         """
 
-        def define_solver_step(name, nset, dof, value, Output_Requested, max_incr_size = 1):
+        def define_solver_step(name, nset, dof, value, Output_Requested, max_incr_size = 1, max_num_incr = 1000):
             """
             A helper function to define the solver step.
             """
             # Defining Folding Step
             match self.var['solver']:
                 case "newton":
-                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC=500")
+                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}")
                     lines.append("*STATIC")  # STATIC SOLVER, IMPLICIT
                     lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
                     lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
                 case 'linear':
-                    lines.append(f"*STEP, NAME={name}, NLGEOM=NO, INC=500")
+                    lines.append(f"*STEP, NAME={name}, NLGEOM=NO, INC={max_num_incr}")
                     lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
                     lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
                     lines.append("*BOUNDARY, TYPE=DISPLACEMENT")  
                 case 'riks':
-                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC=500") 
+                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}") 
                     lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
                     lines.append(f"{max_incr_size}, , 1E-9, {max_incr_size}, , {nset}, {dof}, {value}")
                     # LOADING : FOLDING
                     lines.append("*BOUNDARY, TYPE=DISPLACEMENT") 
                 case 'dynamic':
-                    lines.append("*AMPLITUDE, NAME=AMP-1, DEFINITION=SMOOTH STEP")
+                    lines.append(
+                        f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP"
+                    )
                     lines.append("0, 0, 1, 1")
-                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC=500")
+                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}")
                     lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
-                    lines.append(f"{max_incr_size/100}, 1, 1E-9, {max_incr_size/100}")
-                    lines.append("*BOUNDARY, AMPLITUDE=AMP-1") # DYNAMIC, IMPLICIT
+                    lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
+                    lines.append(f"*BOUNDARY, AMPLITUDE={name}")  
+                case "explicit":
+                    lines.append(
+                        f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP"
+                    )
+                    lines.append("0, 0, 1, 1")
+                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES")
+                    lines.append("*DYNAMIC, EXPLICIT, ELEMENT BY ELEMENT")
+                    lines.append(f" , 1, , {max_incr_size}")
+                    lines.append(
+                        f"*VARIABLE MASS SCALING, DT={max_incr_size}, TYPE=BELOW MIN, FREQUENCY=1"
+                    )
+                    lines.append(f"*BOUNDARY, AMPLITUDE={name}") 
                 case _:
                     raise(f"ERROR: Recieved undefined solver type: {self.var['solver']}")
             # loading
@@ -1016,7 +1151,7 @@ class FairingAnalysis(FairingGeometry):
             for dof in [1, 3, 5, 6]:
                 lines.append(f"PIVOT, {dof}, {dof}")
         else:
-            for dof in range(1, 7):
+            for dof in [1, 2, 3, 5, 6]:
                 lines.append(f"PIVOT, {dof}, {dof}")
 
         # Output request
@@ -1035,7 +1170,15 @@ class FairingAnalysis(FairingGeometry):
         # pre-strain step
         if self.var["pre_strain"] !=0.0:
             value = self.var['pre_strain'] * ((self.var["fairing_span"]/(1+self.var["pre_strain"]))) / 2
-            Output_Requested = define_solver_step("PRESTRAIN", "PIVOT", 2, value, Output_Requested)
+            Output_Requested = define_solver_step(
+                "PRESTRAIN",
+                "PIVOT",
+                2,
+                value,
+                Output_Requested,
+                self.var["solver_increment_settings"]["max_incr_size"],
+                self.var["solver_increment_settings"]["max_num_incr"]
+            )
 
         # folding step
         Output_Requested = define_solver_step(
@@ -1044,7 +1187,11 @@ class FairingAnalysis(FairingGeometry):
             4,
             self.var["rotation_angle"],
             Output_Requested,
-            np.deg2rad(5.0) / self.var["rotation_angle"]
+            min(
+                np.deg2rad(1.0) / self.var["rotation_angle"],
+                self.var["solver_increment_settings"]["max_incr_size"]
+                ),
+            self.var["solver_increment_settings"]["max_num_incr"]
         )
 
         # saving file
@@ -1069,7 +1216,7 @@ class FairingAnalysis(FairingGeometry):
 
         # Assemble the final input file by joining geometry and loading steps
         geometry_file = os.path.join(
-            self.directory.case_folder, "inp", f"{self.case_number}_fairing_geometry.inp"
+            self.directory.case_folder, "inp", f"{self.case_number}_fairing_mesh.inp"
         )
         loading_file = os.path.join(
             self.directory.case_folder, "inp", "fairing_loading.inp"
@@ -1152,19 +1299,33 @@ class FairingAnalysis(FairingGeometry):
         """
         Evaluate the distortion of the fairing surface as an area weighted average.
         """
-        if 'mesh_data' not in self.__dict__:
-            self.load_mesh_data()
+        # load surface mesh data saved in grid data function
+        surface_mesh = Utils.ReadWriteOps.load_object(
+            os.path.join(
+                self.directory.case_folder,
+                "data",
+                f"{self.case_number}_fairing_mesh_data",
+            ),
+            "pickle",
+        )
+        surface_nodes_set = surface_mesh["surface_nodes"]
+        surface_nodes_coords = surface_mesh["surface_nodes_coords"]
+        surface_elements_set = surface_mesh["surface_elements"]
+        surface_elements_nodes = surface_mesh["surface_elements_nodes"]
+        top_surface_elements_set = surface_mesh["top_surface_elements"]
+        bottom_surface_elements_set = surface_mesh["bottom_surface_elements"]
 
-        # surface nodes
-        surface_nodes_set = self.mesh_data["nsets"]["OUTER_SURFACE"]
 
-        # surface nodes coods
-        surface_nodes_coords = self.mesh_data["nodes"][
-            Utils.indices(self.mesh_data["nodes"][:, 0], surface_nodes_set), 1:
-        ] # ordered to surface_nodes_set
+        # index of surface nodes in surface_nodes_set
+        node_idx_in_set = Utils.indices(surface_nodes_set, surface_elements_nodes.flatten()).reshape(surface_elements_nodes.shape)
+
+        # index of top and bottom surface elements in surface_elements_set
+        top_surface_elements_indices = np.argwhere(np.isin(surface_elements_set, top_surface_elements_set)).squeeze()
+        bottom_surface_elements_indices = np.argwhere(np.isin(surface_elements_set, bottom_surface_elements_set)).squeeze()
 
         increments = len(list(surface_nodes_U.values())[0])
         fairing_distortion = np.zeros((increments))
+        max_vertical_displacement = np.zeros((increments))
         for increment in range(increments):
 
             # surface nodes displacements
@@ -1175,86 +1336,21 @@ class FairingAnalysis(FairingGeometry):
             displaced_surface_nodes = surface_nodes_coords + surface_nodes_displacements
 
             # Maximum vertical displacement
-            max_vertical_displacement = np.max(abs(displaced_surface_nodes[:, 2])) 
-
-            # surface node number to displacement and displaced coords index
-            surface_node_number_to_displacement = {}
-            surface_node_number_to_displaced_coords = {}
-            for node_num, disp, disp_coord in zip(
-                surface_nodes_set, surface_nodes_displacements, displaced_surface_nodes
-            ):
-                surface_node_number_to_displacement[node_num] = disp
-                surface_node_number_to_displaced_coords[node_num] = disp_coord
-
-            # surface elements
-            surface_elements_set = self.mesh_data["elsets"]["OUTER_SURFACE"]
-
-            # nodes of surface elements
-            for elements in self.mesh_data["elements"].values():
-                if np.isin(surface_elements_set, elements[:,0]).all():
-                    indices = Utils.indices(elements[:, 0], surface_elements_set)
-                    surface_elements_nodes = elements[np.ix_(indices, np.arange(1, elements.shape[1]))] # ordered to surface_elements_set
-                    break
-
-            # Get displacement of nodes for each surface element
-            surface_elements_nodes_displacement = np.zeros(
-                (surface_elements_set.shape[0], surface_elements_nodes.shape[1], 3)
+            max_vertical_displacement[increment] = np.max(
+                abs(surface_nodes_displacements[:, 2])
             )
-            for i, elem_nodes in enumerate(surface_elements_nodes):
-                for j, node_num in enumerate(elem_nodes):
-                    surface_elements_nodes_displacement[i, j, :] = surface_node_number_to_displacement[node_num]
 
-            # Element centroids
-            surface_element_centroids_displacement = np.mean(surface_elements_nodes_displacement, axis=1)
-
-            # Evaluated at undeformed state
-            if increment==0: 
-                # Get coordinates of nodes for each surface element
-                surface_elements_nodes_displaced_coords = np.zeros(
-                    (surface_elements_set.shape[0], surface_elements_nodes.shape[1], 3)
+            # surface element centroids
+            surface_elements_centroids_displacement = (
+                surface_nodes_displacements[node_idx_in_set][:, :, :].mean(
+                    axis=1
                 )
-                for i, elem_nodes in enumerate(surface_elements_nodes):
-                    for j, node_num in enumerate(elem_nodes):
-                        surface_elements_nodes_displaced_coords[i, j, :] = surface_node_number_to_displaced_coords[node_num]
-
-                # Element centroids
-                surface_element_centroids = np.mean(surface_elements_nodes_displaced_coords, axis=1)
-
-                # Identifing top and bottom surfaces
-                top_surface_elements_indices = np.argwhere(surface_element_centroids[:, 2]>0).squeeze()
-                bottom_surface_elements_indices = np.argwhere(surface_element_centroids[:, 2]<0).squeeze()
-
-                # Initilise lattice class for later use
-                try:
-                    TE = self.mesh_data["nsets"]["TE_TOP"]
-                except:
-                    TE = self.mesh_data["nsets"]["TE"]
-                corner_node = self.mesh_data["nsets"]["RIB_0"][np.argwhere(np.isin(self.mesh_data["nsets"]["RIB_0"], TE)).squeeze()]
-                corner_element = surface_elements_set[np.argwhere(surface_elements_nodes[:, 0]==corner_node).squeeze()]
-                element_grid_shape = np.array([TE.shape[0]-1, self.mesh_data["nsets"]["RIB_0"].shape[0]-1])
-
-                # Saving mesh data to be used in the tailoring process
-                Utils.ReadWriteOps.save_object(
-                    {
-                        "surface_nodes":surface_nodes_set,
-                        "surface_nodes_coords":surface_nodes_coords,
-                        "surface_elements":surface_elements_set, 
-                        "surface_elements_nodes":surface_elements_nodes,
-                        "surface_element_centroids":surface_element_centroids,
-                        "corner_element":corner_element,
-                        "corner_node":corner_node,
-                        "element_grid_shape":element_grid_shape
-                    },
-                    os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_mesh_data"), 
-                    "pickle"
-                )
-
-                continue
+            )
 
             # Element surface area
             surface_element_areas = np.zeros(surface_elements_set.shape[0])
             for i, elem_nodes in enumerate(surface_elements_nodes):
-                coords = surface_elements_nodes_displaced_coords[i]
+                coords = displaced_surface_nodes[node_idx_in_set[i]]
                 # Compute the area using the cross product of two edges
                 if coords.shape[0] == 3: # triangular element
                     vec1 = coords[1] - coords[0]
@@ -1266,8 +1362,8 @@ class FairingAnalysis(FairingGeometry):
             total_surface_area = np.sum(surface_element_areas)
 
             # Calculate average thickness reduction
-            area_weighted_top_U3 = np.sum(surface_element_areas[top_surface_elements_indices]*surface_element_centroids_displacement[top_surface_elements_indices, 2])
-            area_weighted_bottom_U3 = np.sum(surface_element_areas[bottom_surface_elements_indices]*surface_element_centroids_displacement[bottom_surface_elements_indices, 2])
+            area_weighted_top_U3 = np.sum(surface_element_areas[top_surface_elements_indices]*surface_elements_centroids_displacement[top_surface_elements_indices, 2])
+            area_weighted_bottom_U3 = np.sum(surface_element_areas[bottom_surface_elements_indices]*surface_elements_centroids_displacement[bottom_surface_elements_indices, 2])
             average_thickness_reduction = (-area_weighted_top_U3 + area_weighted_bottom_U3)/total_surface_area
 
             # # debugging prints
@@ -1307,8 +1403,12 @@ class FairingAnalysis(FairingGeometry):
             "Torque": fairing_data.hinge_node["RM"][:, 0],  # [Nm]
             "Distortion": distortion,
             "Maximum Displacement": max_vertical_displacement,
-            "Chord": self.var["fairing_chord"],  # [m]
+            # "Chord": self.var["fairing_chord"],  # [m]
         }
+
+        # save in excel file
+        df = pd.DataFrame(self.FairingResponse)
+        df.to_excel(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_response.xlsx"), index=False)
 
         # Plotting
         Utils.Plots.fairing_response(
@@ -1340,79 +1440,99 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="test_case_12")
+    directory = Utils.Directory(case_name="r1_incr_size")
 
-    # # RVE
-    # RVE = RVE(
-    #     variables={
-    #         ## Chevon pointing each other
-    #         "mirror_symmetry": [True, True], 
-    #         "num_tiles": [1, 1],
-    #         ## Chevon pointing same direction
-    #         # "mirror_symmetry": [True, False],
-    #         # "num_tiles": [1, 2],
-    #         ## Restoring default values
-    #         "chevron_angle": Utils.Units.deg2rad(60.0),
-    #         "chevron_wall_length": Utils.Units.mm2m(30.0),
-    #         "chevron_thickness": Utils.Units.mm2m(1.5),
-    #         "chevron_pitch": Utils.Units.mm2m(10.0),
-    #         "rib_thickness": Utils.Units.mm2m(3.0),
-    #         "core_thickness": Utils.Units.mm2m(26.0),
-    #         "facesheet_thickness": Utils.Units.mm2m(0.5),
-    #         "core_material": (396e6, 0.48),
-    #         "facesheet_material": (22.9e6, 0.48),
-    #         "element_type": "C3D8R", 
-    #         "element_size": 0.001
-    #     },
-    #     directory=directory,
-    #     case_number=0
-    # )
-    # RVE.analysis()
+    # RVE
+    RVE = RVE(
+        directory=directory,
+        case_number=0
+    )
+    RVE.analysis()
 
-    # # Fairing definition
-    # fairing = FairingAnalysis(
-    #     variables={
-    #         "aerofoil_name": "rae2822",
-    #         "rotation_angle": Utils.Units.deg2rad(40.0),
-    #         "solver":"dynamic",
-    #         "model_fidelity_settings":{
-    #             "equivalent":{
-    #                 "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
-    #             }
-    #         },
-    #     },  
-    #     directory=directory,
-    #     case_number=0,
-    #     RVE_identifier=0
-    # )
+    # Fairing definition
+    fairing = FairingAnalysis(
+        variables={
+            "rotation_angle": Utils.Units.deg2rad(40.0),
+            "solver":"newton",
+            "model_fidelity_settings":{
+                "equivalent":{
+                    "bool_isotropic": False, # [True, False], if true core properites use, else equivalent panel properties
+                }
+            },
+        },  
+        directory=directory,
+        case_number=0,
+        RVE_identifier=0
+    )
+    fairing.analysis()
+
+    # debuigging
     # fairing.generate_mesh()
-    # fairing.analysis()
+    # fairing.extract_grid_data()
     # fairing.extract_fairing_data()
     # fairing.post_process_results()
 
-    # # TODO: Add the lattice generation and analysis for explicit model
-
-    tailored = FairingAnalysis(
-        variables={
-            "element_size": 0.010,
-            "rotation_angle": Utils.Units.deg2rad(40.0),
-            "solver":"dynamic",
-            "model_fidelity": "explicit", # either of ["equivalent", "explicit", "fullscale"]
-            "model_fidelity_settings":{
-                "equivalent":{
-                    "bool_isotropic": True, # [True, False], if true core properites use, else equivalent panel properties
+    # Spatially tailored model
+    for count, incr_size in enumerate([1e-3, 1e-4, 1e-5], start=1):
+        tailored = FairingAnalysis(
+            variables={
+                "element_size": 0.008,
+                "rotation_angle": Utils.Units.deg2rad(40.0),
+                "solver": "dynamic",
+                "solver_increment_settings": {
+                    "max_incr_size": incr_size, 
+                    "max_num_incr": 1000,  
                 },
-                "explicit":{
-                    "reference_case": 0, # int, case number of the reference case from which the explicit model is generated
-                    "reference_field": 0, # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+                "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
+                "model_fidelity_settings": {
+                    "equivalent": {
+                        "bool_isotropic": True,  # [True, False], if true core properites use, else equivalent panel properties
+                    },
+                    "explicit": {
+                        "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
+                        "reference_field": 0,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+                    },
                 },
             },
-        },
-        RVE_identifier=0,
-        directory=directory,
-        case_number=1,
-    )
-    tailored.generate_mesh()
-    # # tailored.run_abaqus(num_core=10)
-    # # tailored.extract_fairing_data()
+            RVE_identifier=0,
+            directory=directory,
+            case_number=count,
+        )
+        tailored.analysis()
+
+        # tailored.generate_mesh()
+        # tailored.run_abaqus(num_core=10)
+        # tailored.extract_fairing_data()
+        # tailored.post_process_results()
+
+    # ## Test case
+    # tailored = FairingAnalysis(
+    #     variables={
+    #         "element_size": 0.008,
+    #         "rotation_angle": Utils.Units.deg2rad(40.0),
+    #         "solver": "explicit",  # either of ['linear', "newton", "riks", "dynamic", explicit]
+    #         "solver_increment_settings": {
+    #             "max_incr_size": 1e-4,  # maximum increment size
+    #             "max_num_incr": 1000,  # maximum number of increments
+    #         },
+    #         "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
+    #         "model_fidelity_settings": {
+    #             "equivalent": {
+    #                 "bool_isotropic": True,  # [True, False], if true core properites use, else equivalent panel properties
+    #             },
+    #             "explicit": {
+    #                 "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
+    #                 "reference_field": 0,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+    #             },
+    #         },
+    #     },
+    #     RVE_identifier=0,
+    #     directory=directory,
+    #     case_number=1,
+    # )
+    # tailored.analysis()
+
+    # tailored.generate_mesh()
+    # tailored.run_abaqus(num_core=10)
+    # tailored.extract_fairing_data()
     # tailored.post_process_results()
