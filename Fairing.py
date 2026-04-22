@@ -49,13 +49,13 @@ class FairingGeometry:
             else:
                 uc_inputs =Utils.ReadWriteOps.load_object(
                     os.path.join(
-                        directory.case_folder, "input", f"{RVE_identifier}_UC"
+                        self.directory.case_folder, "input", f"{RVE_identifier}_UC"
                     ),
                     "json",
                 )
                 uc_derived_inputs =Utils.ReadWriteOps.load_object(
                     os.path.join(
-                        directory.case_folder, "input", f"{RVE_identifier}_UC_derived"
+                        self.directory.case_folder, "input", f"{RVE_identifier}_UC_derived"
                     ),
                     "json",
                 )
@@ -63,13 +63,13 @@ class FairingGeometry:
             reference_case = self.var["model_fidelity_settings"]["explicit"]["reference_case"]
             uc_inputs =Utils.ReadWriteOps.load_object(
                 os.path.join(
-                    directory.case_folder, "input", f"{reference_case}_UC"
+                    self.directory.case_folder, "input", f"{reference_case}_UC"
                 ),
                 "json",
             )
             uc_derived_inputs =Utils.ReadWriteOps.load_object(
                 os.path.join(
-                    directory.case_folder, "input", f"{reference_case}_UC_derived"
+                    self.directory.case_folder, "input", f"{reference_case}_UC_derived"
                 ),
                 "json",
             )
@@ -95,7 +95,7 @@ class FairingGeometry:
         if self.var["model_fidelity"]=="equivalent" and not self.var["model_fidelity_settings"]["equivalent"]["bool_isotropic"]:
             self.RVE_variables["stiffness"] =Utils.ReadWriteOps.load_object(
                 os.path.join(
-                    directory.case_folder, "data", f"{RVE_identifier}_stiffness"
+                    self.directory.case_folder, "data", f"{RVE_identifier}_stiffness"
                 ),
                 "json",
             )
@@ -103,7 +103,7 @@ class FairingGeometry:
         # saving independent variables
         Utils.ReadWriteOps.save_object(
             self.var,
-            os.path.join(directory.case_folder, "input", f"{case_number}_FR"),
+            os.path.join(self.directory.case_folder, "input", f"{self.case_number}_FR"),
             method="json",
         )
 
@@ -405,7 +405,7 @@ class FairingGeometry:
                 
                 if rem > 0.0:
                     print(
-                        f"\tWARNING: rib arc length not an integer multiple of cell size. Num cells {num_arc_units}, Remainder {rem:.4f}"
+                        f"\t\tWARNING: rib arc length not an integer multiple of cell size. Num cells {num_arc_units}, Remainder {rem:.4f}"
                     )
                 if self.var["element_size"] is None:
                     num_nodes_in_wing_cross_section = int(num_arc_units)
@@ -422,7 +422,7 @@ class FairingGeometry:
                 num_bay_units, rem = divmod(rib_spacing, self.RVE_variables["lx"])
                 if rem > 0.0:
                     print(
-                        f"\tWARNING: bay spacing not an integer multiple of cell size. Num cells {num_bay_units}, Remainder {rem:.4f}"
+                        f"\t\tWARNING: bay spacing not an integer multiple of cell size. Num cells {num_bay_units}, Remainder {rem:.4f}"
                     )
                 if self.var["element_size"] is None:
                     num_nodes_in_wing_rib_bay = int(num_bay_units)
@@ -1037,7 +1037,7 @@ class FairingGeometry:
             # Create geometry
             create_abaqus_geometry()
 
-        print(f"Starting GMSH for {self.directory.case_name} - {self.case_number}")
+        print(f"\tStarting GMSH for {self.directory.case_name} - {self.case_number}")
 
         # Initialize GMSH
         gmsh.initialize()
@@ -1210,6 +1210,8 @@ class FairingAnalysis(FairingGeometry):
         self, abaqus_path: str = "C:\\SIMULIA\\Commands\\abaqus", num_core: int = 4
     ):
         """Runs the Abaqus analysis for the generated FR model."""
+
+        print(f"\tStarting Abaqus for {self.directory.case_name} - {self.case_number}")
 
         # Create loading steps
         self.create_loading_steps()
@@ -1412,15 +1414,47 @@ class FairingAnalysis(FairingGeometry):
 
         # Plotting
         Utils.Plots.fairing_response(
-            self.FairingResponse,
-            save_path=os.path.join(self.directory.case_folder, "fig", f"{self.case_number}_fairing_response.png"),
-            show=False
+            {self.case_number: self.FairingResponse},
+            save_path=os.path.join(
+                self.directory.case_folder,
+                "fig",
+                f"{self.case_number}_fairing_response.png",
+            ),
+            show=False,
         )
 
         if self.var["model_fidelity"] == "equivalent":
             # Trace Lattice
             trace_data = Tailoring.Tracer(self.directory, self.case_number)
             trace_data.analysis()
+
+    def reduce_step_size(self, factor):
+        """Reduce the step size of the solver by a given factor and saves the updated variables."""
+
+        # update step size
+        self.var["solver_increment_settings"]["max_incr_size"] *= factor
+
+        # saving updated variables
+        Utils.ReadWriteOps.save_object(
+            self.var,
+            os.path.join(self.directory.case_folder, "input", f"{self.case_number}_FR"),
+            method="json",
+        )
+
+    def check_convergence(self):
+        """Check the convergence of the simulation by reading the .sta file."""
+
+        # read sta file
+        with open(
+                os.path.join(self.directory.case_folder, "sta", f"{self.case_number}_FR.sta"), "r"
+            ) as f:
+            sta_file = f.read().strip().splitlines()
+
+        # check if last line indicates successful completion
+        if sta_file[-1].strip() == "THE ANALYSIS HAS COMPLETED SUCCESSFULLY":
+            return True
+        else:
+            return False  
 
     @Utils.logger
     def analysis(self):
@@ -1432,6 +1466,21 @@ class FairingAnalysis(FairingGeometry):
         # Run simulation
         self.run_abaqus(num_core=10)
 
+        # If not converged, reduce step size and re-run
+        num_attempts = int(
+            self.var["solver_increment_settings"]["max_incr_size"]
+            / self.var["solver_increment_settings"]["max_incr_size"]
+        )
+        for attempt in range(num_attempts):
+            # Check convergence
+            if self.check_convergence():
+                print("Simulation converged successfully.")
+                break
+            else:
+                print(f"Simulation did not converge. Attempt {attempt+1}/{num_attempts}. Reducing step size and re-running.")
+                self.reduce_step_size(factor=0.1)
+                self.run_abaqus(num_core=10)
+
         # Extract results
         self.extract_fairing_data()
 
@@ -1440,7 +1489,7 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="r1_incr_size")
+    directory = Utils.Directory(case_name="r1_mesh_convergence")
 
     # RVE
     RVE = RVE(
@@ -1466,22 +1515,23 @@ if __name__ == "__main__":
     )
     fairing.analysis()
 
-    # debuigging
-    # fairing.generate_mesh()
-    # fairing.extract_grid_data()
-    # fairing.extract_fairing_data()
-    # fairing.post_process_results()
+    # # debuigging
+    # # fairing.generate_mesh()
+    # # fairing.extract_grid_data()
+    # # fairing.extract_fairing_data()
+    # # fairing.post_process_results()
 
     # Spatially tailored model
-    for count, incr_size in enumerate([1e-3, 1e-4, 1e-5], start=1):
+    for count, element_size in enumerate([0.04, 0.02, 0.01, 0.005, 0.0025], start=1):
         tailored = FairingAnalysis(
             variables={
-                "element_size": 0.008,
+                "element_size": element_size,
                 "rotation_angle": Utils.Units.deg2rad(40.0),
                 "solver": "dynamic",
                 "solver_increment_settings": {
-                    "max_incr_size": incr_size, 
-                    "max_num_incr": 1000,  
+                    "max_incr_size": 1e-2,
+                    "min_incr_size": 1e-5,
+                    "max_num_incr": 1000,
                 },
                 "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
                 "model_fidelity_settings": {
@@ -1505,14 +1555,16 @@ if __name__ == "__main__":
         # tailored.extract_fairing_data()
         # tailored.post_process_results()
 
+
     # ## Test case
     # tailored = FairingAnalysis(
     #     variables={
-    #         "element_size": 0.008,
+    #         "element_size": 0.004,
     #         "rotation_angle": Utils.Units.deg2rad(40.0),
-    #         "solver": "explicit",  # either of ['linear', "newton", "riks", "dynamic", explicit]
+    #         "solver": "dynamic",  # either of ['linear', "newton", "riks", "dynamic", explicit]
     #         "solver_increment_settings": {
-    #             "max_incr_size": 1e-4,  # maximum increment size
+    #             "max_incr_size": 1e-2,  # maximum increment size
+    #             "min_incr_size": 1e-5,  # minimum increment size
     #             "max_num_incr": 1000,  # maximum number of increments
     #         },
     #         "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
@@ -1536,3 +1588,4 @@ if __name__ == "__main__":
     # tailored.run_abaqus(num_core=10)
     # tailored.extract_fairing_data()
     # tailored.post_process_results()
+

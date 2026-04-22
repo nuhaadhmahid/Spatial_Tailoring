@@ -40,7 +40,8 @@ FAIRING_DEFAULTS = {
     },
     "solver": "newton",  # either of ['linear', "newton", "riks", "dynamic", explicit]
     "solver_increment_settings": {
-        "max_incr_size": 1e-2,  # maximum increment size for the solver
-        "max_num_incr": 1000,  # maximum number of increments for the solver
+        "max_incr_size": 1e-2,  # maximum increment size
+        "min_incr_size": 1e-5,  # minimum increment size
+        "max_num_incr": 1000,  # maximum number of increments
     },
 }

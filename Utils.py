@@ -931,34 +931,46 @@ class Plots:
             FairingResponse (dict or list): The fairing response data to plot.
             save_path (str, optional): Path to save the figure. If None, figure is not saved.
             show (bool, optional): Whether to display the plot. Default is False.
+            ax (matplotlib.axes.Axes, optional): The axes object to plot on. If None, a new figure is created.
         """
         fig, ax1 = plt.subplots(figsize=(3, 3))
-        num_colours = len(FairingResponse) if isinstance(FairingResponse, (list, tuple)) else 1
+        ax2 = ax1.twinx()
+  
+        num_colours = len(FairingResponse) if isinstance(FairingResponse, (list, tuple, dict)) else 1
         colourmap = plt.get_cmap('rainbow', num_colours)
         colours = list(colourmap(i) for i in range(num_colours))
 
-        for i, data in enumerate([FairingResponse]):
+        for i, (key, data) in enumerate(FairingResponse.items()):
             rotation = data["Rotation"]
             torque = data["Torque"]
             distortion = Units.m2mm(data["Distortion"])
 
+            # trim
+            if torque[-1]/torque[-2]>2:
+                print("\t\tPlotting: Trimming last point due to large jump in torque")
+                torque = torque[:-1]
+                rotation = rotation[:-1]
+                distortion = distortion[:-1]
 
-            ax1.plot(rotation, torque, color=colours[i], linestyle='-', label="Torque")
+            ax1.plot(rotation, torque, color=colours[i], linestyle='-', label=f"{key}")
             ax1.set_xlabel("Rotation [deg]")
             ax1.set_ylabel("Torque [Nm] (solid)")
 
-            ax2 = ax1.twinx()
-            ax2.plot(rotation, distortion, color=colours[i], linestyle='--', label="Distortion")
+            
+            ax2.plot(rotation, distortion, color=colours[i], linestyle='--', label=None)
             ax2.set_ylabel("Distortion [mm] (dashed)")
 
-            # Save the figure if requested
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        # legend
+        ax1.legend(loc="upper left", frameon=False)
 
-            if show:
-                plt.show()
-            else:
-                plt.close()
+        # Save the figure if requested
+        if save_path is not None:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
 
     @staticmethod
     def grid(coords_labels, save_path=None, show=False):
