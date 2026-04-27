@@ -885,7 +885,7 @@ class Plots:
             show (bool, optional): Whether to display the plot. Default is False.
         """
 
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(3.54 * 2, (3.54 / 2) * 0.95))
 
         # Check if input is a list or dictionary
         if isinstance(aerofoils, list):
@@ -904,14 +904,24 @@ class Plots:
         # Format the plot
         plt.xlabel("X")
         plt.ylabel("Y")
-        plt.grid(True, linestyle="--", alpha=0.7)
+        plt.grid(True, linestyle="-", alpha=0.2)
         plt.legend(
             loc="lower center",
             bbox_to_anchor=(0.5, 1.05),
             ncol=len(aerofoils) if isinstance(aerofoils, list) else len(aerofoils.keys()),
             frameon=False,
+            fontsize=12
         )
         plt.gca().set_aspect("equal")
+
+        # xlim and ylim with some padding
+        all_coords = np.vstack(list(aerofoils.values()) if isinstance(aerofoils, dict) else aerofoils)
+        x_min, x_max = all_coords[:, 0].min(), all_coords[:, 0].max()
+        y_min, y_max = all_coords[:, 1].min(), all_coords[:, 1].max()
+        x_padding = 0.005 * (x_max - x_min)
+        y_padding = 0.1 * (y_max - y_min)
+        plt.xlim(x_min - x_padding, x_max + x_padding)
+        plt.ylim(y_min - y_padding, y_max + y_padding)
 
         # Save the figure if requested
         if save_path:

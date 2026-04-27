@@ -1078,41 +1078,31 @@ class FairingAnalysis(FairingGeometry):
         Add loading steps to the simulation.
         """
 
-        def define_solver_step(name, nset, dof, value, Output_Requested, max_incr_size = 1, max_num_incr = 1000):
+        def define_solver_step(name, keywords, data_lines, solver, Output_Requested, max_incr_size = 1, max_num_incr = 1000):
             """
             A helper function to define the solver step.
             """
             # Defining Folding Step
-            match self.var['solver']:
+            match solver:
                 case "newton":
                     lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}")
                     lines.append("*STATIC")  # STATIC SOLVER, IMPLICIT
                     lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
-                    lines.append("*BOUNDARY, TYPE=DISPLACEMENT")
+                    lines.append("*"+",".join(keywords))
                 case 'linear':
                     lines.append(f"*STEP, NAME={name}, NLGEOM=NO, INC={max_num_incr}")
                     lines.append("*STATIC") # STATIC SOLVER, IMPLICIT
                     lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
-                    lines.append("*BOUNDARY, TYPE=DISPLACEMENT")  
-                case 'riks':
-                    lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}") 
-                    lines.append("*STATIC, RIKS") # RIKS SOLVER, IMPLICIT
-                    lines.append(f"{max_incr_size}, , 1E-9, {max_incr_size}, , {nset}, {dof}, {value}")
-                    # LOADING : FOLDING
-                    lines.append("*BOUNDARY, TYPE=DISPLACEMENT") 
+                    lines.append("*"+",".join(keywords))
                 case 'dynamic':
-                    lines.append(
-                        f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP"
-                    )
+                    lines.append(f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP")
                     lines.append("0, 0, 1, 1")
                     lines.append(f"*STEP, NAME={name}, NLGEOM=YES, INC={max_num_incr}")
                     lines.append("*DYNAMIC, APPLICATION=QUASI-STATIC")
                     lines.append(f"{max_incr_size}, 1, 1E-9, {max_incr_size}")
-                    lines.append(f"*BOUNDARY, AMPLITUDE={name}")  
+                    lines.append("*" + ",".join(keywords+[f"AMPLITUDE={name}"])) 
                 case "explicit":
-                    lines.append(
-                        f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP"
-                    )
+                    lines.append(f"*AMPLITUDE, NAME={name}, DEFINITION=SMOOTH STEP")
                     lines.append("0, 0, 1, 1")
                     lines.append(f"*STEP, NAME={name}, NLGEOM=YES")
                     lines.append("*DYNAMIC, EXPLICIT, ELEMENT BY ELEMENT")
@@ -1120,11 +1110,13 @@ class FairingAnalysis(FairingGeometry):
                     lines.append(
                         f"*VARIABLE MASS SCALING, DT={max_incr_size}, TYPE=BELOW MIN, FREQUENCY=1"
                     )
-                    lines.append(f"*BOUNDARY, AMPLITUDE={name}") 
+                    lines.append("*" + ",".join(keywords + [f"AMPLITUDE={name}"]))
                 case _:
-                    raise(f"ERROR: Recieved undefined solver type: {self.var['solver']}")
+                    raise(f"ERROR: Recieved undefined solver type: {solver}")
             # loading
-            lines.append(f"{nset}, {dof}, {dof}, {value}")
+            for line in data_lines:
+                lines.append(line)
+
             # OUTPUT REQUESTS
             if not Output_Requested:
                 lines.extend(Output_Requests)
@@ -1167,31 +1159,51 @@ class FairingAnalysis(FairingGeometry):
         ]
         Output_Requested = False
 
+        steps = []
+
         # pre-strain step
         if self.var["pre_strain"] !=0.0:
             value = self.var['pre_strain'] * ((self.var["fairing_span"]/(1+self.var["pre_strain"]))) / 2
             Output_Requested = define_solver_step(
-                "PRESTRAIN",
-                "PIVOT",
-                2,
-                value,
-                Output_Requested,
-                self.var["solver_increment_settings"]["max_incr_size"],
-                self.var["solver_increment_settings"]["max_num_incr"]
+                name="PRESTRAIN",
+                keywords=["BOUNDARY"],
+                data_lines=[f"PIVOT, 2, 2, {value}"],
+                solver="newton" if self.var["solver"]!="explicit" else "explicit",
+                Output_Requested=Output_Requested,
+                max_incr_size=self.var["solver_increment_settings"]["max_incr_size"],
+                max_num_incr=self.var["solver_increment_settings"]["max_num_incr"]
+            )
+
+        # pressure
+        if self.var["bool_pressure"] == True:
+            Output_Requested = define_solver_step(
+                name="PRESSURE",
+                keywords=["DSLOAD"],
+                data_lines=[f"PIVOT, 2, 2, {value}"],
+                solver="newton"
+                if self.var["solver"] != "explicit"
+                else "explicit",
+                Output_Requested=Output_Requested,
+                max_incr_size=self.var["solver_increment_settings"][
+                    "max_incr_size"
+                ],
+                max_num_incr=self.var["solver_increment_settings"][
+                    "max_num_incr"
+                ],
             )
 
         # folding step
         Output_Requested = define_solver_step(
-            "FOLDING",
-            "PIVOT",
-            4,
-            self.var["rotation_angle"],
-            Output_Requested,
-            min(
+            name="FOLDING",
+            keywords=["BOUNDARY"],
+            data_lines=[f"PIVOT, 4, 4, {self.var['rotation_angle']}"],
+            solver=self.var["solver"],
+            Output_Requested=Output_Requested,
+            max_incr_size=min(
                 np.deg2rad(1.0) / self.var["rotation_angle"],
-                self.var["solver_increment_settings"]["max_incr_size"]
-                ),
-            self.var["solver_increment_settings"]["max_num_incr"]
+                self.var["solver_increment_settings"]["max_incr_size"],
+            ),
+            max_num_incr=self.var["solver_increment_settings"]["max_num_incr"],
         )
 
         # saving file
@@ -1489,7 +1501,7 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="r1_mesh_convergence")
+    directory = Utils.Directory(case_name="r3_tailoring_without_pressure")
 
     # RVE
     RVE = RVE(
@@ -1516,16 +1528,15 @@ if __name__ == "__main__":
     fairing.analysis()
 
     # # debuigging
-    # # fairing.generate_mesh()
-    # # fairing.extract_grid_data()
-    # # fairing.extract_fairing_data()
-    # # fairing.post_process_results()
+    # fairing.generate_mesh()
+    # fairing.extract_fairing_data()
+    # fairing.post_process_results()
 
     # Spatially tailored model
-    for count, element_size in enumerate([0.04, 0.02, 0.01, 0.005, 0.0025], start=1):
+    for count, field_angle in enumerate([0, 5, 10, 15], start=1):
         tailored = FairingAnalysis(
             variables={
-                "element_size": element_size,
+                "element_size": Utils.Units.mm2m(2.0),  # selected 2mm
                 "rotation_angle": Utils.Units.deg2rad(40.0),
                 "solver": "dynamic",
                 "solver_increment_settings": {
@@ -1540,7 +1551,7 @@ if __name__ == "__main__":
                     },
                     "explicit": {
                         "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
-                        "reference_field": 0,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
+                        "reference_field": field_angle,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
                     },
                 },
             },
@@ -1559,7 +1570,7 @@ if __name__ == "__main__":
     # ## Test case
     # tailored = FairingAnalysis(
     #     variables={
-    #         "element_size": 0.004,
+    #         "element_size": 0.02,
     #         "rotation_angle": Utils.Units.deg2rad(40.0),
     #         "solver": "dynamic",  # either of ['linear', "newton", "riks", "dynamic", explicit]
     #         "solver_increment_settings": {
