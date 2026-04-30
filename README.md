@@ -104,11 +104,11 @@ tailored.analysis()
 |---|---|---|
 | `chevron_angle` | 60° | Angle of the chevron arms relative to the spanwise direction |
 | `chevron_wall_length` | 30 mm | Length of a single chevron arm |
-| `chevron_pitch` | 10 mm | Spanwise spacing between adjacent chevrons |
-| `core_thickness` | 26 mm | Total thickness of the core layer |
+| `chevron_pitch` | 10 mm | Chordwise spacing between adjacent chevrons |
+| `core_thickness` | 26 mm | Thickness of the core |
 | `facesheet_thickness` | 0.5 mm | Thickness of each facesheet |
-| `fairing_chord` | 1.6 m | Chordwise extent of the fairing panel |
-| `fairing_span` | 0.8 m | Spanwise extent of the fairing panel |
+| `fairing_chord` | 1.6 m | Chord of the fairing|
+| `fairing_span` | 0.8 m | Span of the fairing |
 | `model_fidelity` | `"equivalent"` | `"equivalent"` (homogenised shell) or `"explicit"` (resolved core) |
 
 ---
