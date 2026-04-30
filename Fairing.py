@@ -15,8 +15,22 @@ from RVE import RVE
 from DEFAUTLS import FAIRING_DEFAULTS
 
 class FairingData:
+    """
+    Lightweight data container for storing per-case fairing simulation results.
+
+    Holds post-processed output data (hinge-node rotation history, surface-node fields,
+    and shell-equivalent strains/curvatures) after an Abaqus analysis has been extracted.
+    """
 
     def __init__(self, case_folder, case_number, hinge_node={}, surface_nodes={}, shell_equivalent={}):
+        """
+        Parameters:
+            case_folder (str): Absolute path to the case output directory.
+            case_number (int): Integer identifier for the analysis case.
+            hinge_node (dict): Extracted hinge-node results keyed by result type (e.g. 'UR').
+            surface_nodes (dict): Extracted surface-node results.
+            shell_equivalent (dict): Shell-equivalent strain/curvature fields keyed by element number.
+        """
         self.case_folder = case_folder
         self.case_number = case_number
         self.hinge_node = hinge_node
@@ -24,10 +38,39 @@ class FairingData:
         self.shell_equivalent = shell_equivalent
 
 class FairingGeometry:
+    """
+    Generates the finite-element geometry and mesh for a morphing aerofoil fairing panel.
+
+    Supports two fidelity levels:
+        - **equivalent**: A homogenised shell model whose stiffness comes from a pre-computed
+          RVE analysis.
+        - **explicit**: A geometrically-resolved shell model of the chevron-core lattice,
+          generated using field-guided spatial tailoring.
+
+    The class orchestrates mesh generation (via GMSH), Abaqus input-file writing, and
+    intermediate data persistence for downstream analysis steps.
+
+    Attributes:
+        var (dict): Fairing design parameters (see DEFAUTLS.FAIRING_DEFAULTS).
+        RVE_variables (dict): Geometric and stiffness properties extracted from the RVE.
+        directory (Utils.Directory): Workspace directory paths.
+        case_number (int): Integer identifier for the current analysis case.
+    """
 
     def __init__(
         self, variables=None, RVE_identifier=None, directory=Utils.Directory(), case_number: int = 0
     ):
+        """
+        Initialise the fairing geometry, resolve RVE properties, and persist input settings.
+
+        Parameters:
+            variables (dict, optional): Override values for any key in FAIRING_DEFAULTS.
+            RVE_identifier (int, optional): Case number of a previously-run RVE analysis to
+                load stiffness data from. If None and model_fidelity=="equivalent", a new
+                RVE analysis is run automatically.
+            directory (Utils.Directory): Workspace directory object.
+            case_number (int): Integer label used when naming saved files.
+        """
 
         # set directory and case number
         self.directory = directory
@@ -108,6 +151,24 @@ class FairingGeometry:
         )
 
     def load_aerofoil(self,aerofoil_database=None, num_points=None):
+        """
+        Load and optionally resample aerofoil coordinates from the database.
+
+        The aerofoil is identified by ``self.var['aerofoil_name']``. Coordinates are read
+        from a CSV-style ``.dat`` file and, if ``num_points`` is provided, resampled onto
+        a cosine-spaced distribution for better leading-edge resolution.
+
+        Parameters:
+            aerofoil_database (str, optional): Path to the aerofoil database directory.
+                Defaults to ``<run_folder>/aerofoil_database``.
+            num_points (int, optional): Number of points for the resampled upper/lower
+                surfaces. If None the original point count is preserved.
+
+        Returns:
+            numpy.ndarray: Array of shape (n, 2) with normalised (x, y) aerofoil coordinates,
+                starting at the trailing edge, going over the upper surface to the leading
+                edge, and returning along the lower surface.
+        """
         if aerofoil_database is None:
             aerofoil_database = os.path.join(
                 self.directory.run_folder, "aerofoil_database"
@@ -1012,6 +1073,7 @@ class FairingGeometry:
                     )
 
                 # saving file
+                print(f"\tSaving ABAQUS geometry for {self.directory.case_name} - {self.case_number}")
                 with open(
                     os.path.join(
                         self.directory.case_folder,
@@ -1174,23 +1236,23 @@ class FairingAnalysis(FairingGeometry):
                 max_num_incr=self.var["solver_increment_settings"]["max_num_incr"]
             )
 
-        # pressure
-        if self.var["bool_pressure"] == True:
-            Output_Requested = define_solver_step(
-                name="PRESSURE",
-                keywords=["DSLOAD"],
-                data_lines=[f"PIVOT, 2, 2, {value}"],
-                solver="newton"
-                if self.var["solver"] != "explicit"
-                else "explicit",
-                Output_Requested=Output_Requested,
-                max_incr_size=self.var["solver_increment_settings"][
-                    "max_incr_size"
-                ],
-                max_num_incr=self.var["solver_increment_settings"][
-                    "max_num_incr"
-                ],
-            )
+        # # pressure TODO: implement pressure loading for explicit model
+        # if self.var["bool_pressure"] == True:
+        #     Output_Requested = define_solver_step(
+        #         name="PRESSURE",
+        #         keywords=["DSLOAD"],
+        #         data_lines=[f"PIVOT, 2, 2, {value}"],
+        #         solver="newton"
+        #         if self.var["solver"] != "explicit"
+        #         else "explicit",
+        #         Output_Requested=Output_Requested,
+        #         max_incr_size=self.var["solver_increment_settings"][
+        #             "max_incr_size"
+        #         ],
+        #         max_num_incr=self.var["solver_increment_settings"][
+        #             "max_num_incr"
+        #         ],
+        #     )
 
         # folding step
         Output_Requested = define_solver_step(
@@ -1501,7 +1563,8 @@ class FairingAnalysis(FairingGeometry):
 
 
 if __name__ == "__main__":
-    directory = Utils.Directory(case_name="r3_tailoring_without_pressure")
+
+    directory = Utils.Directory(case_name="Example")
 
     # RVE
     RVE = RVE(
@@ -1513,7 +1576,7 @@ if __name__ == "__main__":
     # Fairing definition
     fairing = FairingAnalysis(
         variables={
-            "rotation_angle": Utils.Units.deg2rad(40.0),
+            "rotation_angle": Utils.Units.deg2rad(10.0),
             "solver":"newton",
             "model_fidelity_settings":{
                 "equivalent":{
@@ -1527,76 +1590,29 @@ if __name__ == "__main__":
     )
     fairing.analysis()
 
-    # # debuigging
-    # fairing.generate_mesh()
-    # fairing.extract_fairing_data()
-    # fairing.post_process_results()
-
-    # Spatially tailored model
-    for count, field_angle in enumerate([0, 5, 10, 15], start=1):
-        tailored = FairingAnalysis(
-            variables={
-                "element_size": Utils.Units.mm2m(2.0),  # selected 2mm
-                "rotation_angle": Utils.Units.deg2rad(40.0),
-                "solver": "dynamic",
-                "solver_increment_settings": {
-                    "max_incr_size": 1e-2,
-                    "min_incr_size": 1e-5,
-                    "max_num_incr": 1000,
-                },
-                "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
-                "model_fidelity_settings": {
-                    "equivalent": {
-                        "bool_isotropic": True,  # [True, False], if true core properites use, else equivalent panel properties
-                    },
-                    "explicit": {
-                        "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
-                        "reference_field": field_angle,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
-                    },
+    tailored = FairingAnalysis(
+        variables={
+            "element_size": 0.005,
+            "rotation_angle": Utils.Units.deg2rad(10.0),
+            "solver": "dynamic",
+            "solver_increment_settings": {
+                "max_incr_size": 1e-2,
+                "min_incr_size": 1e-5,
+                "max_num_incr": 1000,
+            },
+            "model_fidelity": "explicit",  # either of ["equivalent", "explicit"]
+            "model_fidelity_settings": {
+                "explicit": {
+                    "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
+                    "reference_field": 0,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
                 },
             },
-            RVE_identifier=0,
-            directory=directory,
-            case_number=count,
-        )
-        tailored.analysis()
-
-        # tailored.generate_mesh()
-        # tailored.run_abaqus(num_core=10)
-        # tailored.extract_fairing_data()
-        # tailored.post_process_results()
+        },
+        RVE_identifier=0,
+        directory=directory,
+        case_number=1,
+    )
+    tailored.analysis()
 
 
-    # ## Test case
-    # tailored = FairingAnalysis(
-    #     variables={
-    #         "element_size": 0.02,
-    #         "rotation_angle": Utils.Units.deg2rad(40.0),
-    #         "solver": "dynamic",  # either of ['linear', "newton", "riks", "dynamic", explicit]
-    #         "solver_increment_settings": {
-    #             "max_incr_size": 1e-2,  # maximum increment size
-    #             "min_incr_size": 1e-5,  # minimum increment size
-    #             "max_num_incr": 1000,  # maximum number of increments
-    #         },
-    #         "model_fidelity": "explicit",  # either of ["equivalent", "explicit", "fullscale"]
-    #         "model_fidelity_settings": {
-    #             "equivalent": {
-    #                 "bool_isotropic": True,  # [True, False], if true core properites use, else equivalent panel properties
-    #             },
-    #             "explicit": {
-    #                 "reference_case": 0,  # int, case number of the reference case from which the explicit model is generated
-    #                 "reference_field": 0,  # int, rotation angle for the folding wingtip from whose deformation the field is extracted
-    #             },
-    #         },
-    #     },
-    #     RVE_identifier=0,
-    #     directory=directory,
-    #     case_number=1,
-    # )
-    # tailored.analysis()
-
-    # tailored.generate_mesh()
-    # tailored.run_abaqus(num_core=10)
-    # tailored.extract_fairing_data()
-    # tailored.post_process_results()
 

@@ -68,6 +68,10 @@ def unique_1D(A):
 def run_subprocess(command, run_folder, log_file):
     """Runs a shell command and captures its output."""
     try:
+        # ensure the run folder exists
+        if not os.path.exists(run_folder):
+            os.makedirs(run_folder)
+        # log the command and its output
         start_time = time.time()
         process = subprocess.run(
             command,
@@ -107,8 +111,22 @@ def run_subprocess(command, run_folder, log_file):
 
 
 class FairingData:
+    """
+    Lightweight data container for storing per-case fairing simulation results.
+
+    Holds post-processed output data (hinge-node rotation history, surface-node fields,
+    and shell-equivalent strains/curvatures) after an Abaqus analysis has been extracted.
+    """
 
     def __init__(self, case_folder, case_number, hinge_node={}, surface_nodes={}, shell_equivalent={}):
+        """
+        Parameters:
+            case_folder (str): Absolute path to the case output directory.
+            case_number (int): Integer identifier for the analysis case.
+            hinge_node (dict): Extracted hinge-node results keyed by result type (e.g. 'UR').
+            surface_nodes (dict): Extracted surface-node results.
+            shell_equivalent (dict): Shell-equivalent strain/curvature fields keyed by element number.
+        """
         self.case_folder = case_folder
         self.case_number = case_number
         self.hinge_node = hinge_node
@@ -810,7 +828,25 @@ class Units:
         return np.rad2deg(value)
 
 class Directory:
+    """
+    Manages workspace directory paths and ensures the required folder structure exists.
+
+    On construction, creates the case output folder and all standard sub-directories
+    (mesh, input, inp, data, fig, log, etc.) so that downstream code can write files
+    without checking for directory existence.
+
+    Attributes:
+        case_name (str): Human-readable name for the analysis case.
+        run_folder (str): Absolute path to the working directory (cwd at construction time).
+        case_folder (str): Absolute path to ``<run_folder>/<case_name>``.
+        abaqus_folder (str): Absolute path to the shared Abaqus scratch folder.
+    """
+
     def __init__(self, case_name: str = "default_case"):
+        """
+        Parameters:
+            case_name (str): Sub-directory name for the case. Defaults to ``'default_case'``.
+        """
         self.case_name = case_name
         self.run_folder = os.path.abspath(os.getcwd())
         self.case_folder = os.path.join(self.run_folder, case_name)
@@ -833,10 +869,6 @@ class Directory:
             "temp",
         ]:
             os.makedirs(os.path.join(self.case_folder, sub), exist_ok=True)
-        for sub in ["inp", "data"]:
-            os.makedirs(
-                os.path.join(self.case_folder, sub, "serialised"), exist_ok=True
-            )
 
 class Plots:
 

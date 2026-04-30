@@ -1,3 +1,15 @@
+"""
+DEFAUTLS.py — Default configuration dictionaries for RVE and FairingGeometry.
+
+RVE_DEFAULTS:
+    Default geometric and material parameters for a single unit-cell (RVE) of the
+    chevron-core sandwich panel. All length quantities are in metres and angles in radians.
+
+FAIRING_DEFAULTS:
+    Default design and solver parameters for the morphing fairing model. Lengths are in
+    metres and angles in radians unless otherwise stated in the comment.
+"""
+
 import Utils
 
 # Default configuration
@@ -40,7 +52,7 @@ FAIRING_DEFAULTS = {
     },
     "solver": "newton",  # either of ['linear', "newton", "riks", "dynamic", explicit]
     "solver_increment_settings": {
-        "max_incr_size": 1e-2,  # maximum increment size
+        "max_incr_size": 1e-1,  # maximum increment size
         "min_incr_size": 1e-5,  # minimum increment size
         "max_num_incr": 1000,  # maximum number of increments
     },

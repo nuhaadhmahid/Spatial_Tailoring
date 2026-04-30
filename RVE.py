@@ -9,7 +9,30 @@ import gmsh
 import numpy as np
 
 class RVE:
+    """
+    Representative Volume Element (RVE) class for modelling the unit cell of a chevron-core sandwich panel.
+
+    The RVE encapsulates a single repeating unit of the core structure (ZPR, NPR, or PPR type)
+    and computes its geometric parameters, mesh, and homogenised stiffness properties for use
+    in fairing-level simulations.
+
+    Attributes:
+        var (dict): Input geometric and material parameters (see DEFAUTLS.RVE_DEFAULTS).
+        derived_var (dict): Derived geometric parameters computed from `var`.
+        directory (Utils.Directory): Directory paths for reading/writing data.
+        case_number (int): Integer identifier for the current analysis case.
+    """
+
     def __init__(self, variables=None, directory=None, case_number: int = 0):
+        """
+        Initialise the RVE with geometric/material variables, set up directories, and inputs.
+
+        Parameters:
+            variables (dict, optional): Override values for any key in RVE_DEFAULTS.
+            directory (Utils.Directory, optional): Workspace directory object. Defaults to
+                Utils.Directory() (current working directory).
+            case_number (int): Integer label used when naming saved files.
+        """
         # directory setup
         if directory is None:
             directory = Utils.Directory()
@@ -581,6 +604,20 @@ class RVE:
         ]
 
     def eval_derived_variables(self, bool_plot = True):
+        """
+        Compute and store all derived geometric variables for the RVE unit cell.
+
+        Calculates quarter-cell dimensions (qlx, qly, qlz), full cell dimensions (lx, ly, lz),
+        and the core area ratio from the base input variables. Then dispatches to the
+        appropriate core-type geometry method (zpr/npr/ppr) to populate coordinate and
+        connectivity data. Results are saved to JSON for downstream use.
+
+        Parameters:
+            bool_plot (bool): If True, saves a plot of the core geometry. Default is True.
+
+        Modifies:
+            self.derived_var (dict): Populated with computed dimensional and connectivity data.
+        """
         # Compute derived geometric variables common for all cores and store in self.derived
         self.derived_var = {}
         self.derived_var["qlx"] = self.var["chevron_wall_length"] * np.cos(

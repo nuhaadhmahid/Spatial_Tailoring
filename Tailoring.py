@@ -13,7 +13,29 @@ from concurrent.futures import ThreadPoolExecutor
 from scipy import interpolate
 
 class Tracer:
+    """
+    Traces the principal-strain and principal-curvature field lines over the fairing surface.
+
+    Using deformation data from a prior Abaqus shell analysis, the Tracer class:
+        1. Loads shell-equivalent strain (SE) and curvature (SK) fields from pickled fairing data.
+        2. Organises surface elements and nodes into a structured 2-D grid.
+        3. Flattens the curved 3-D surface onto a plane for field interpolation.
+        4. Integrates field-line paths via 4th-order Runge-Kutta to produce trace lines and
+           lattice lines used to drive the spatial tailoring of the core architecture.
+
+    Attributes:
+        trace_lines (dict): Integrated principal field lines for each deformation target.
+        lattice_lines (dict): Resampled lattice lines derived from the trace lines.
+    """
+
     def __init__(self, directory=Utils.Directory(), case_number:int= 0):
+        """
+        Initialise the Tracer by loading all required mesh and field data.
+
+        Parameters:
+            directory (Utils.Directory): Workspace directory object.
+            case_number (int): Integer identifier matching saved analysis files.
+        """
         self.directory = directory
         self.case_number = case_number
 
@@ -27,6 +49,16 @@ class Tracer:
         self.load_element_data()
 
     def load_field_data(self):
+        """
+        Load shell-equivalent strain and curvature fields from a pickled FairingData object.
+
+        Populates:
+            self.shell_equivalent_SE: Per-element shell membrane-strain Voigt vectors over all
+                load increments.
+            self.shell_equivalent_SK: Per-element shell curvature Voigt vectors over all
+                load increments.
+            self.rotation_angles: Hinge-node rotation angle history (radians) from the analysis.
+        """
         fairing_data: FairingData = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_data"), "pickle")
 
         self.shell_equivalent_SE = fairing_data.shell_equivalent_SE
@@ -34,6 +66,13 @@ class Tracer:
         self.rotation_angles = fairing_data.hinge_node["UR"][:, 0]
 
     def load_cell_data(self):
+        """
+        Load RVE unit-cell dimensions and the chevron angle from saved JSON inputs.
+
+        Populates:
+            self.cell_dimensions (list): [lx, ly, lz] unit-cell dimensions in metres.
+            self.chevron_angle (float): Chevron angle in radians.
+        """
         RVE_derived = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC_derived"), "json")
         RVE_input = Utils.ReadWriteOps.load_object(os.path.join(self.directory.case_folder, "input", f"{self.case_number}_UC"), "json")
 
@@ -41,6 +80,19 @@ class Tracer:
         self.chevron_angle = RVE_input["chevron_angle"]
 
     def load_element_data(self):
+        """
+        Load surface mesh data (nodes, elements, centroids, grid metadata) from a pickle file.
+
+        Populates:
+            self.surface_nodes: 1-D array of surface node numbers.
+            self.surface_nodes_coords: (N, 3) float32 array of node coordinates.
+            self.surface_elements: 1-D array of surface element numbers.
+            self.surface_elements_nodes: (M, 4) array of element connectivity (quad elements).
+            self.surface_element_centroids: (M, 3) float32 array of element centroid coordinates.
+            self.corner_element: Element number at the trailing-edge / inboard-rib corner.
+            self.corner_node: Node number at the trailing-edge / inboard-rib corner.
+            self.element_grid_shape: (nSpan, nChord) shape of the structured element grid.
+        """
         mesh_data = Utils.ReadWriteOps.load_object(
             os.path.join(self.directory.case_folder, "data", f"{self.case_number}_fairing_mesh_data"), 
             "pickle"
@@ -279,6 +331,26 @@ class Tracer:
         return vector_out
 
     def create_field_vectors(self, bool_plot=False):
+        """
+        Build per-element principal-direction interpolators from the shell strain/curvature fields.
+
+        For each target deformation angle (0°, 5°, 10°, 15°, 20°):
+            - Converts Voigt field vectors to 2×2 symmetric tensors.
+            - Performs eigen-decomposition to extract principal directions and magnitudes.
+            - Ensures eigenvector sign and ordering continuity across the grid.
+            - Builds RBF interpolators (``self.f_interp``) for both directions and magnitudes
+              of the SE and SK fields, enabling evaluation at arbitrary surface locations.
+
+        Parameters:
+            bool_plot (bool): If True, saves quiver plots of the principal fields to the
+                figure directory. Default is False.
+
+        Modifies:
+            self.shell_equivalent_SE: Rotated and reordered strain field array.
+            self.shell_equivalent_SK: Rotated and reordered curvature field array.
+            self.f_interp (dict): Nested dict of RBF interpolators keyed by angle (degrees)
+                and parameter name (e.g. 'vals_SE', 'vecs_SE', 'vals_SK', 'vecs_SK').
+        """
 
         # Collecting the field data
         self.shell_equivalent_SE = np.array([self.shell_equivalent_SE[number] for number in self.surface_elements])
@@ -457,6 +529,18 @@ class Tracer:
                 )
 
     def save_grid_data(self):
+        """
+        Saves the structured grid data (node/element grids and 2-D projections) to a pickle file.
+
+        Saves a dictionary containing:
+            - ``surface_nodes_coords``: 3-D coordinates of surface nodes.
+            - ``node_index_grid``: 2-D array of node indices in the structured grid.
+            - ``nodes_grid_2D``: 2-D flattened node positions on the unwrapped surface.
+            - ``centroids_grid_2D``: 2-D flattened element centroid positions.
+            - ``element_index_grid``: 2-D array of element indices in the structured grid.
+
+        Output file: ``<case_folder>/data/<case_number>_grid_data.pickle``
+        """
         Utils.ReadWriteOps.save_object(
             {
                 "surface_nodes_coords": self.surface_nodes_coords,
@@ -471,6 +555,29 @@ class Tracer:
 
     @staticmethod
     def runga_kutta(f_interp, seeds, boundary, step_size=0.01, max_steps=None, directions=np.array([-1,1])):
+        """
+        Integrate field lines from seed points using 4th-order Runge-Kutta (RK4).
+
+        Propagates each seed point in the specified directions along the vector field
+        defined by ``f_interp``, trimming resulting paths at the given boundary box.
+
+        Parameters:
+            f_interp (callable): A function that accepts an (N, 2) array of positions and
+                returns an (N, 2) array of unit direction vectors at those positions.
+            seeds (numpy.ndarray): (N, 2) array of starting positions for each field line.
+            boundary (numpy.ndarray): (2, 2) array [[x_min, y_min], [x_max, y_max]] defining
+                the domain within which lines are kept.
+            step_size (float): Arc-length integration step in the same units as the coordinates.
+                Default is 0.01.
+            max_steps (int, optional): Maximum number of integration steps in each direction.
+                Derived from boundary extent divided by step_size when None.
+            directions (numpy.ndarray): 1-D array of direction multipliers (e.g. [-1, 1] for
+                forward and backward integration). Default is np.array([-1, 1]).
+
+        Returns:
+            list[numpy.ndarray]: List of trimmed path arrays, each of shape (k, 2), one per
+                continuous segment within the boundary.
+        """
 
         if max_steps is None:
             max_steps = int(np.diff(boundary, axis=0).max()//step_size//2)*2+10
