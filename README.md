@@ -4,13 +4,13 @@
 
 ## Overview
 
-This repository implements a computational framework for **spatially tailoring** the internal architecture of a chevron-core sandwich fairing panel so that its compliance is maximised for a target morphing deformation.
+This repository implements a computational framework for **spatially tailoring** the internal architecture of a accordion core sandwich fairing panel so that its compliance is maximised for a target morphing deformation.
 
-The core idea is to extract the principal-strain and principal-curvature fields from a homogenised finite-element analysis of the deformed fairing, then use those fields to orient the unit cells of the chevron core locally across the panel — reducing the structural stiffness in the directions that matter most for morphing.
+The core idea is to extract the principal-strain and principal-curvature fields from a homogenised finite-element analysis of the deformed fairing, then use those fields to orient the unit cells of the core locally across the panel — reducing the structural stiffness in the directions that matter most for morphing.
 
 <img src="images/process.png" alt="Spatial tailoring process" width="500"/>
 
-The approach yields significant improvements in aerodynamic shape-change efficiency for the morphing fairing:
+The approach yields significant improvements in reducing cross-section distortion of the fairing while the wingtip folds:
 
 <img src="images/results.png" alt="Performance improvement" width="500"/>
 
@@ -25,7 +25,7 @@ The code models the detailed geometry of the sandwich panel over the wing sectio
 ├── RVE.py               # Unit-cell (RVE) geometry, mesh generation, and stiffness homogenisation
 ├── Fairing.py           # Fairing-panel geometry and mesh generation (equivalent & explicit models)
 ├── Tailoring.py         # Field-line tracing and lattice generation for spatial tailoring
-├── Mesh.py              # Low-level mesh data structures (nodes, elements, sets)
+├── Mesh.py              # Mesh data structures (nodes, elements, sets)
 ├── Utils.py             # Shared utilities: I/O, geometry ops, unit conversions, plotting
 ├── Plotting.py          # Standalone script for post-processing response plots
 ├── aerofoil_database/   # .dat coordinate files for standard aerofoil profiles
@@ -109,7 +109,7 @@ tailored.analysis()
 | `facesheet_thickness` | 0.5 mm | Thickness of each facesheet |
 | `fairing_chord` | 1.6 m | Chord of the fairing|
 | `fairing_span` | 0.8 m | Span of the fairing |
-| `model_fidelity` | `"equivalent"` | `"equivalent"` (homogenised shell) or `"explicit"` (resolved core) |
+| `model_fidelity` | `"equivalent"` | `"equivalent"` (homogenised shell) or `"explicit"` (detailed panel geometry) |
 
 ---
 
